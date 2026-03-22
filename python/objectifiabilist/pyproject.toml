@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "objectifiabilist_SHAKERF"
+version = "0.1.0"
+authors = [
+  { name = "Your Name", email = "you@example.com" },
+]
+description = "Python implementation of Objectifiabilism — a constructivist metaethical framework for explicit, auditable, comparative moral reasoning"
+readme = { file = "README.md", content-type = "text/markdown" }
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.0"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Intended Audience :: Science/Research",
+]
+keywords = ["ethics", "metaethics", "moral reasoning", "philosophy"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Repository = "https://github.com/ShakerFunkhouser/objectifiabilist/python"
+
