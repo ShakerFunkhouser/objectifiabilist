@@ -276,7 +276,7 @@ $$\text{Weighted net-benefit} = (0.8)(5/7)(-1) + (0.2)(6/7)(-1) = -0.74$$
 
 Total importance of moral concerns affected (same as Choice 1): **4.28**
 
-$$\text{Moral value} = (4.28)(-0.74) = \mathbf{-3.17}$$
+$$\text{Moral value} = (4.28)(-0.74) = \mathbf{-3.18}$$
 
 **Effect 2** — Group 3 | Wealth | Short-term
 
@@ -334,17 +334,17 @@ _Chain Effect 2_ — Group 2 | Health | Long-term
 | Somewhat low likelihood of being somewhat detrimental | 40%        | Somewhat high (5/7) | Negative |
 | Somewhat high likelihood of being neutral             | 60%        | —                   | Zero     |
 
-$$\text{Weighted net-benefit} = (0.4)(5/7)(-1) + (0.6)(0) = -0.28$$
+$$\text{Weighted net-benefit} = (0.4)(5/7)(-1) + (0.6)(0) = -0.29$$
 
 Long-term health of Group 2 members has **no matching moral priority** → total importance = 0
 
-$$\text{Moral value} = (-0.28)(0) = \mathbf{0}$$
+$$\text{Moral value} = (-0.29)(0) = \mathbf{0}$$
 
 $$\text{Moral valence of chain effects} = -0.78 + 0 = -0.78$$
 
 $$\text{Total moral value of Effect 3 (including chains)} = 0 + (-0.78) = \mathbf{-0.78}$$
 
-> **Moral valence of Choice 3: $-3.17 + (-0.00045) + 0 + (-0.78) = \mathbf{-3.00045}$**
+> **Moral valence of Choice 3: $-3.18 + (-0.00045) + 0 + (-0.78) = \mathbf{-3.96}$**
 
 ---
 
@@ -375,8 +375,8 @@ $$\text{Moral value} = (0.71)(-1) = \mathbf{-0.71}$$
 | Rank             | Choice   | Moral Valence |
 | ---------------- | -------- | ------------- |
 | 1 _(prescribed)_ | Choice 4 | −0.71         |
-| 2                | Choice 3 | −3.00045      |
-| 3                | Choice 2 | −3.72         |
+| 2                | Choice 2 | −3.72         |
+| 3                | Choice 3 | −3.96         |
 | 4                | Choice 1 | −7.20         |
 
 Taking −0.71 as the maximum possible good and −7.20 as the minimum, the spread is $6.49$, and each bucket has width $6.49 \div 7 \approx 0.927$. Mapping all choices onto the preferability enum:
@@ -385,7 +385,7 @@ Taking −0.71 as the maximum possible good and −7.20 as the minimum, the spre
 | -------- | ------------------------ | ----------------------- |
 | Choice 1 | Extremely unpreferable   | Extremely unpreferable  |
 | Choice 2 | Neutral                  | Somewhat preferable     |
-| Choice 3 | Somewhat preferable      | Somewhat unpreferable   |
+| Choice 3 | Neutral                  | Somewhat unpreferable   |
 | Choice 4 | Extremely preferable     | Extremely unpreferable  |
 
 ### Divergence Signals
@@ -396,10 +396,10 @@ Converting all preferabilities to ordinal values and computing the absolute diff
 | -------- | ------------------- | -------------------- | ---------- |
 | Choice 1 | 1                   | 1                    | 0          |
 | Choice 2 | 5                   | 4                    | 1          |
-| Choice 3 | 3                   | 5                    | 2          |
+| Choice 3 | 3                   | 4                    | 1          |
 | Choice 4 | 1                   | 7                    | 6          |
 
-$$\text{Average divergence signal} = \frac{0 + 1 + 2 + 6}{4} = \mathbf{2.25}$$
+$$\text{Average divergence signal} = \frac{0 + 1 + 1 + 6}{4} = \mathbf{2.00}$$
 
 ---
 
