@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "objectifiabilist_SHAKERF"
-version = "0.1.0"
+name = "objectifiabilist"
+version = "0.1.1"
 authors = [
   { name = "Your Name", email = "you@example.com" },
 ]
@@ -27,4 +27,10 @@ dev = ["pytest>=8.0"]
 
 [project.urls]
 Repository = "https://github.com/ShakerFunkhouser/objectifiabilist/python"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/objectifiabilist_SHAKERF"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/objectifiabilist_SHAKERF" = "objectifiabilist"
 
