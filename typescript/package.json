@@ -1,0 +1,39 @@
+{
+  "name": "objectifiabilist",
+  "version": "0.1.0",
+  "description": "Objectifiabilist calculation functions (TypeScript port)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/index.js",
+    "dist/index.d.ts",
+    "dist/functions.js",
+    "dist/functions.d.ts",
+    "dist/types.js",
+    "dist/types.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShakerFunkhouser/objectifiabilist.git"
+  },
+  "author": "Shaker Funkhouser",
+  "license": "MIT",
+  "keywords": [
+    "ethics",
+    "metaethics",
+    "moral reasoning",
+    "philosophy"
+  ],
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "jest": "^29.0.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  }
+}
