@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "resolveJsonModule": true,
+    "types": ["jest", "node"]
+  },
+  "include": ["src/**/*", "../../fixtures/**/*"],
+  "exclude": []
+}

@@ -411,6 +411,92 @@
       "Choice 4": -6
     },
     "meanAbsoluteDivergence": 2.0,
-    "prescribedChoice": "Choice 4"
+    "prescribedChoice": "Choice 4",
+    "inferredMoralPriorities": {
+      "_note": "Minimum-norm solution (A·Aᵀ·y=b, x=Aᵀ·y) with 11 concerns and 4 choices. Three short-term demographic concerns clamp to 0 (minimum-norm distributes weight to charband and long-term concerns instead). Values rounded to 6 d.p.",
+      "demographic|health|short-term|Demographic 1": 0.0,
+      "demographic|health|short-term|Demographic 2": 0.0,
+      "demographic|health|short-term|Demographic 3": 0.0,
+      "characteristicBand|health|short-term|num:Characteristic 3:[20..40]": 0.576668,
+      "demographic|wealth|short-term|Demographic 4": 0.00036,
+      "demographic|wealth|long-term|Demographic 4": 0.047948,
+      "demographic|health|long-term|Demographic 1": 0.264201,
+      "demographic|health|long-term|Demographic 2": 0.088067,
+      "demographic|health|long-term|Demographic 3": 0.088067,
+      "characteristicBand|health|long-term|num:Characteristic 3:[20..40]": 0.587113,
+      "characteristicBand|health|short-term|num:Characteristic 3:[30..30];str:Characteristic 2=2A": 0.0
+    },
+    "moralPriorityDivergenceSignalFromStatedPreferabilities": {
+      "_note": "Computed by comparing ethic.moralPriorities (purported) against inferredMoralPriorities. QualitativeMagnitude ordinals normalised by /7.",
+      "meanAbsoluteDivergence": 0.439781,
+      "perConcern": {
+        "demographic|health|short-term|Demographic 1": {
+          "purportedImportance": 1.0,
+          "inferredImportance": 0.0,
+          "signedDivergence": 1.0,
+          "absoluteDivergence": 1.0
+        },
+        "demographic|health|short-term|Demographic 2": {
+          "purportedImportance": 0.714286,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.714286,
+          "absoluteDivergence": 0.714286
+        },
+        "demographic|health|short-term|Demographic 3": {
+          "purportedImportance": 0.571429,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.571429,
+          "absoluteDivergence": 0.571429
+        },
+        "characteristicBand|health|short-term|num:Characteristic 3:[20..40]": {
+          "purportedImportance": 0.0,
+          "inferredImportance": 0.576668,
+          "signedDivergence": -0.576668,
+          "absoluteDivergence": 0.576668
+        },
+        "demographic|wealth|short-term|Demographic 4": {
+          "purportedImportance": 0.428571,
+          "inferredImportance": 0.00036,
+          "signedDivergence": 0.428212,
+          "absoluteDivergence": 0.428212
+        },
+        "demographic|wealth|long-term|Demographic 4": {
+          "purportedImportance": 0.0,
+          "inferredImportance": 0.047948,
+          "signedDivergence": -0.047948,
+          "absoluteDivergence": 0.047948
+        },
+        "demographic|health|long-term|Demographic 1": {
+          "purportedImportance": 1.0,
+          "inferredImportance": 0.264201,
+          "signedDivergence": 0.735799,
+          "absoluteDivergence": 0.735799
+        },
+        "demographic|health|long-term|Demographic 2": {
+          "purportedImportance": 0.0,
+          "inferredImportance": 0.088067,
+          "signedDivergence": -0.088067,
+          "absoluteDivergence": 0.088067
+        },
+        "demographic|health|long-term|Demographic 3": {
+          "purportedImportance": 0.0,
+          "inferredImportance": 0.088067,
+          "signedDivergence": -0.088067,
+          "absoluteDivergence": 0.088067
+        },
+        "characteristicBand|health|long-term|num:Characteristic 3:[20..40]": {
+          "purportedImportance": 0.0,
+          "inferredImportance": 0.587113,
+          "signedDivergence": -0.587113,
+          "absoluteDivergence": 0.587113
+        },
+        "characteristicBand|health|short-term|num:Characteristic 3:[30..30];str:Characteristic 2=2A": {
+          "purportedImportance": 0.0,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.0,
+          "absoluteDivergence": 0.0
+        }
+      }
+    }
   }
 }

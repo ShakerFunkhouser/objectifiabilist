@@ -304,3 +304,23 @@ class SEJPOutput(BaseModel):
     dilemma: Dilemma
     ethic: Ethic
     statedPreferabilities: list[StatedPreferability]
+
+
+# ---------------------------------------------------------------------------
+# Moral priority inference results
+# ---------------------------------------------------------------------------
+
+class MoralPriorityDivergenceResult(BaseModel):
+    moralConcern: MoralConcern
+    """Importance drawn from the purported ethic, normalized to [0, 1]. 0 if concern has no matching purported priority."""
+    purportedImportance: float
+    """Importance inferred from stated preferabilities, normalized to [0, 1]."""
+    inferredImportance: float
+    """purportedImportance - inferredImportance"""
+    signedDivergence: float
+    absoluteDivergence: float
+
+
+class MoralPriorityDivergenceSignal(BaseModel):
+    perConcern: list[MoralPriorityDivergenceResult]
+    meanAbsoluteDivergence: float

@@ -15,15 +15,14 @@ import pytest
 
 from objectifiabilist.functions import (
     _charband_satisfies_concern_band,
-    _cbm_satisfies_concern,
-    _individual_satisfies_concern,
-    _individual_satisfies_demographic,
     calculate_weighted_net_benefit,
     calculate_importance,
-    calculate_moral_value_of_effect,
     calculate_all_moral_valences,
     calculate_preferabilities,
     calculate_divergence_signal,
+    extract_moral_concerns_from_dilemma,
+    infer_moral_priorities,
+    calculate_moral_priority_divergence_signal,
     _build_worked_example,
 )
 from objectifiabilist.models import (
@@ -36,7 +35,6 @@ from objectifiabilist.models import (
     DemographicMoralConcern,
     Dilemma,
     Effect,
-    Ethic,
     Group,
     IndividualMember,
     MoralPriority,
@@ -441,3 +439,256 @@ class TestWorkedExample:
     def test_mean_absolute_divergence(self, results):
         _, _, signal = results
         assert math.isclose(signal.meanAbsoluteDivergence, 2.0)
+
+
+# ---------------------------------------------------------------------------
+# 7. extract_moral_concerns_from_dilemma
+# ---------------------------------------------------------------------------
+
+class TestExtractMoralConcernsFromDilemma:
+    @pytest.fixture
+    def chars(self):
+        C3 = NumericalCharacteristic(name="age", minValue=0, maxValue=100)
+        D_elderly = Demographic(
+            name="Elderly",
+            numericalBands=[NumericalCharacteristicValueBand(characteristic=C3, minValue=65, maxValue=100)],
+        )
+        D_young = Demographic(
+            name="Young",
+            numericalBands=[NumericalCharacteristicValueBand(characteristic=C3, minValue=0, maxValue=30)],
+        )
+        return C3, D_elderly, D_young
+
+    def _simple_effect(self, group, facet, outlook):
+        return Effect(
+            affectedGroup=group,
+            facetOfProsperity=facet,
+            outlook=outlook,
+            possibleBenefits=[PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.Moderate, signage="negative")],
+        )
+
+    def test_extracts_demographic_concern(self, chars):
+        C3, D_elderly, _ = chars
+        g = Group(name="G", demographicMemberships=[DemographicMembership(demographic=D_elderly, count=5)])
+        dilemma = Dilemma(name="D", choices=[Choice(name="A", effects=[self._simple_effect(g, "health", "short-term")])])
+        concerns = extract_moral_concerns_from_dilemma(dilemma)
+        assert len(concerns) == 1
+        assert isinstance(concerns[0], DemographicMoralConcern)
+        assert concerns[0].demographic.name == "Elderly"
+
+    def test_deduplicates_identical_concerns(self, chars):
+        C3, D_elderly, _ = chars
+        g = Group(name="G", demographicMemberships=[DemographicMembership(demographic=D_elderly, count=3)])
+        effect = self._simple_effect(g, "health", "short-term")
+        dilemma = Dilemma(
+            name="D",
+            choices=[
+                Choice(name="A", effects=[effect]),
+                Choice(name="B", effects=[effect]),
+            ],
+        )
+        concerns = extract_moral_concerns_from_dilemma(dilemma)
+        assert len(concerns) == 1
+
+    def test_extracts_charband_concern(self, chars):
+        C3, _, _ = chars
+        cbm = CharacteristicBandMembership(
+            characteristicBands=[NumericalCharacteristicValueBand(characteristic=C3, minValue=65, maxValue=100)],
+            count=4,
+        )
+        g = Group(name="G", characteristicBandMemberships=[cbm])
+        dilemma = Dilemma(name="D", choices=[Choice(name="A", effects=[self._simple_effect(g, "wealth", "long-term")])])
+        concerns = extract_moral_concerns_from_dilemma(dilemma)
+        assert len(concerns) == 1
+        assert isinstance(concerns[0], CharacteristicBandMoralConcern)
+
+    def test_extracts_from_chain_effects(self, chars):
+        C3, D_elderly, D_young = chars
+        g1 = Group(name="G1", demographicMemberships=[DemographicMembership(demographic=D_elderly, count=2)])
+        g2 = Group(name="G2", demographicMemberships=[DemographicMembership(demographic=D_young, count=3)])
+        chain = self._simple_effect(g2, "health", "long-term")
+        root = Effect(
+            affectedGroup=g1,
+            facetOfProsperity="health",
+            outlook="short-term",
+            possibleBenefits=[PossibleBenefit(likelihood=0.8, qualitativeMagnitude=QM.VeryHigh, signage="negative")],
+            chainEffects=[chain],
+        )
+        dilemma = Dilemma(name="D", choices=[Choice(name="A", effects=[root])])
+        concerns = extract_moral_concerns_from_dilemma(dilemma)
+        assert len(concerns) == 2
+
+    def test_returns_empty_for_no_memberships(self, chars):
+        g = Group(name="G")
+        dilemma = Dilemma(name="D", choices=[Choice(name="A", effects=[self._simple_effect(g, "health", "short-term")])])
+        assert extract_moral_concerns_from_dilemma(dilemma) == []
+
+
+# ---------------------------------------------------------------------------
+# 8. infer_moral_priorities
+# ---------------------------------------------------------------------------
+
+class TestInferMoralPriorities:
+    @pytest.fixture
+    def chars(self):
+        C3 = NumericalCharacteristic(name="age", minValue=0, maxValue=100)
+        D_elderly = Demographic(
+            name="Elderly",
+            numericalBands=[NumericalCharacteristicValueBand(characteristic=C3, minValue=65, maxValue=100)],
+        )
+        D_young = Demographic(
+            name="Young",
+            numericalBands=[NumericalCharacteristicValueBand(characteristic=C3, minValue=0, maxValue=30)],
+        )
+        return C3, D_elderly, D_young
+
+    def _effect(self, demo, facet, outlook, likelihood, mag, signage):
+        g = Group(name="G", demographicMemberships=[DemographicMembership(demographic=demo, count=1)])
+        return Effect(
+            affectedGroup=g,
+            facetOfProsperity=facet,
+            outlook=outlook,
+            possibleBenefits=[PossibleBenefit(likelihood=likelihood, qualitativeMagnitude=mag, signage=signage)],
+        )
+
+    def test_importance_in_unit_interval(self, chars):
+        _, D_elderly, D_young = chars
+        dilemma = Dilemma(
+            name="D",
+            choices=[
+                Choice(name="A", effects=[
+                    self._effect(D_elderly, "health", "short-term", 0.8, QM.VeryHigh, "negative"),
+                    self._effect(D_young, "health", "short-term", 0.2, QM.Moderate, "negative"),
+                ]),
+                Choice(name="B", effects=[
+                    self._effect(D_elderly, "health", "short-term", 0.3, QM.Moderate, "negative"),
+                    self._effect(D_young, "health", "short-term", 0.9, QM.ExtremelyHigh, "negative"),
+                ]),
+            ],
+        )
+        result = infer_moral_priorities(
+            dilemma,
+            [StatedPreferability(choiceName="A", statedPreferability=QP.SomewhatUnpreferable),
+             StatedPreferability(choiceName="B", statedPreferability=QP.VeryPreferable)],
+        )
+        assert len(result) == 2
+        for p in result:
+            assert 0.0 <= float(p.importance) <= 1.0
+
+    def test_zero_contribution_column_gets_zero_importance(self, chars):
+        _, D_elderly, _ = chars
+        # All zero signage → contribution matrix column is zero
+        g = Group(name="G", demographicMemberships=[DemographicMembership(demographic=D_elderly, count=1)])
+        zero_effect = Effect(
+            affectedGroup=g,
+            facetOfProsperity="health",
+            outlook="short-term",
+            possibleBenefits=[PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="zero")],
+        )
+        dilemma = Dilemma(
+            name="D",
+            choices=[
+                Choice(name="A", effects=[zero_effect]),
+                Choice(name="B", effects=[zero_effect]),
+            ],
+        )
+        result = infer_moral_priorities(
+            dilemma,
+            [StatedPreferability(choiceName="A", statedPreferability=QP.ExtremelyUnpreferable),
+             StatedPreferability(choiceName="B", statedPreferability=QP.ExtremelyPreferable)],
+        )
+        assert len(result) == 1
+        assert result[0].importance == 0.0
+
+    def test_defaults_missing_stated_preferability_to_neutral(self, chars):
+        _, D_elderly, _ = chars
+        dilemma = Dilemma(
+            name="D",
+            choices=[
+                Choice(name="A", effects=[self._effect(D_elderly, "health", "short-term", 1.0, QM.Moderate, "negative")]),
+                Choice(name="B", effects=[self._effect(D_elderly, "health", "short-term", 1.0, QM.VeryHigh, "negative")]),
+            ],
+        )
+        # Supply only "A" — "B" should default to Neutral (4)
+        result = infer_moral_priorities(
+            dilemma,
+            [StatedPreferability(choiceName="A", statedPreferability=QP.VeryUnpreferable)],
+        )
+        assert len(result) == 1
+        assert 0.0 <= float(result[0].importance) <= 1.0
+
+    def test_returns_empty_for_no_group_memberships(self):
+        g = Group(name="G")  # no memberships → no concerns
+        dilemma = Dilemma(
+            name="D",
+            choices=[Choice(name="A", effects=[
+                Effect(affectedGroup=g, facetOfProsperity="health", outlook="short-term",
+                       possibleBenefits=[PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.Moderate, signage="negative")])
+            ])],
+        )
+        result = infer_moral_priorities(dilemma, [])
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# 9. calculate_moral_priority_divergence_signal
+# ---------------------------------------------------------------------------
+
+class TestCalculateMoralPriorityDivergenceSignal:
+    @pytest.fixture
+    def demo_concern(self):
+        C3 = NumericalCharacteristic(name="age", minValue=0, maxValue=100)
+        D = Demographic(
+            name="Elderly",
+            numericalBands=[NumericalCharacteristicValueBand(characteristic=C3, minValue=65, maxValue=100)],
+        )
+        return DemographicMoralConcern(demographic=D, facetOfProsperity="health", outlook="short-term")
+
+    def test_zero_divergence_when_importances_match(self, demo_concern):
+        inferred = [MoralPriority(moralConcern=demo_concern, importance=0.5)]
+        purported = [MoralPriority(moralConcern=demo_concern, importance=0.5)]
+        signal = calculate_moral_priority_divergence_signal(purported, inferred)
+        assert len(signal.perConcern) == 1
+        assert math.isclose(signal.perConcern[0].absoluteDivergence, 0.0)
+        assert math.isclose(signal.meanAbsoluteDivergence, 0.0)
+
+    def test_purported_zero_when_no_matching_priority(self, demo_concern):
+        inferred = [MoralPriority(moralConcern=demo_concern, importance=0.7)]
+        purported = []  # no match
+        signal = calculate_moral_priority_divergence_signal(purported, inferred)
+        assert math.isclose(signal.perConcern[0].purportedImportance, 0.0)
+        assert math.isclose(signal.perConcern[0].inferredImportance, 0.7)
+        assert math.isclose(signal.perConcern[0].signedDivergence, -0.7)
+        assert math.isclose(signal.perConcern[0].absoluteDivergence, 0.7)
+
+    def test_normalizes_qualitative_importance_ordinals(self, demo_concern):
+        # QM.ExtremelyHigh = 7 → normalized to 1.0
+        purported = [MoralPriority(moralConcern=demo_concern, importance=QM.ExtremelyHigh)]
+        inferred = [MoralPriority(moralConcern=demo_concern, importance=0.5)]
+        signal = calculate_moral_priority_divergence_signal(purported, inferred)
+        assert math.isclose(signal.perConcern[0].purportedImportance, 1.0)
+        assert math.isclose(signal.perConcern[0].signedDivergence, 0.5)
+
+    def test_correct_mean_for_multiple_concerns(self, demo_concern):
+        C3 = NumericalCharacteristic(name="age", minValue=0, maxValue=100)
+        D_young = Demographic(
+            name="Young",
+            numericalBands=[NumericalCharacteristicValueBand(characteristic=C3, minValue=0, maxValue=30)],
+        )
+        young_concern = DemographicMoralConcern(demographic=D_young, facetOfProsperity="wealth", outlook="long-term")
+        inferred = [
+            MoralPriority(moralConcern=demo_concern, importance=0.4),
+            MoralPriority(moralConcern=young_concern, importance=0.6),
+        ]
+        purported = [
+            MoralPriority(moralConcern=demo_concern, importance=0.6),
+            MoralPriority(moralConcern=young_concern, importance=0.2),
+        ]
+        signal = calculate_moral_priority_divergence_signal(purported, inferred)
+        # |0.6-0.4| = 0.2; |0.2-0.6| = 0.4; mean = 0.3
+        assert math.isclose(signal.meanAbsoluteDivergence, 0.3)
+
+    def test_empty_lists_produce_zero_mean(self):
+        signal = calculate_moral_priority_divergence_signal([], [])
+        assert signal.perConcern == []
+        assert signal.meanAbsoluteDivergence == 0.0

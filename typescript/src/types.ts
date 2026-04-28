@@ -212,3 +212,23 @@ export interface SEJPOutput {
   ethic: Ethic;
   statedPreferabilities: StatedPreferability[];
 }
+
+// ---------------------------------------------------------------------------
+// Moral priority inference results
+// ---------------------------------------------------------------------------
+
+export interface MoralPriorityDivergenceResult {
+  moralConcern: MoralConcern;
+  /** Importance drawn from the purported ethic, normalized to [0, 1]. 0 if concern has no matching purported priority. */
+  purportedImportance: number;
+  /** Importance inferred from stated preferabilities, normalized to [0, 1]. */
+  inferredImportance: number;
+  /** purportedImportance − inferredImportance */
+  signedDivergence: number;
+  absoluteDivergence: number;
+}
+
+export interface MoralPriorityDivergenceSignal {
+  perConcern: MoralPriorityDivergenceResult[];
+  meanAbsoluteDivergence: number;
+}

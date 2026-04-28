@@ -287,9 +287,12 @@ const GROUP1 = {
 };
 const GROUP2 = {
   name: "Group 2",
-  individuals: Array(6).fill({
-    numericalValues: [{ characteristic: C3, value: 30 }],
-  }),
+  characteristicBandMemberships: [
+    {
+      characteristicBands: [{ characteristic: C3, minValue: 20, maxValue: 40 }],
+      count: 6,
+    },
+  ],
 };
 const GROUP3 = {
   name: "Group 3",
@@ -297,10 +300,13 @@ const GROUP3 = {
 };
 const GROUP4 = {
   name: "Group 4",
-  individuals: [
+  characteristicBandMemberships: [
     {
-      stringValues: [{ characteristic: C2, value: "2A" }],
-      numericalValues: [{ characteristic: C3, value: 30 }],
+      characteristicBands: [
+        { characteristic: C3, minValue: 30, maxValue: 30 },
+        { characteristic: C2, value: "2A" },
+      ],
+      count: 1,
     },
   ],
 };

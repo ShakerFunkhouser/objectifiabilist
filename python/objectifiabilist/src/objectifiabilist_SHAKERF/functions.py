@@ -22,6 +22,9 @@ Public API:
   calculate_preferabilities(moral_valences) -> dict[str, QualitativePreferability]
   calculate_divergence_signal(stated, computed) -> DivergenceSignal
   evaluate_sejp_output(output) -> DivergenceSignal
+  extract_moral_concerns_from_dilemma(dilemma) -> list[MoralConcern]
+  infer_moral_priorities(dilemma, stated_preferabilities, optimism_bias) -> list[MoralPriority]
+  calculate_moral_priority_divergence_signal(purported, inferred) -> MoralPriorityDivergenceSignal
 
 Run this file directly to verify the worked example.
 """
@@ -44,6 +47,9 @@ from .models import (
     Ethic,
     Group,
     IndividualMember,
+    MoralPriority,
+    MoralPriorityDivergenceResult,
+    MoralPriorityDivergenceSignal,
     NumericalCharacteristic,
     NumericalCharacteristicValueBand,
     PossibleBenefit,
@@ -496,6 +502,284 @@ def is_action_permitted(choice_name: str, dilemma, ordained_ethic: Ethic) -> boo
 
 
 # ---------------------------------------------------------------------------
+# Moral priority inference
+# ---------------------------------------------------------------------------
+
+def _concern_key(concern) -> str:
+    """Stable string key uniquely identifying a MoralConcern."""
+    if isinstance(concern, DemographicMoralConcern):
+        return f"demographic|{concern.facetOfProsperity}|{concern.outlook}|{concern.demographic.name}"
+    # CharacteristicBandMoralConcern
+    parts = []
+    for b in concern.characteristicBands:
+        if isinstance(b, BooleanCharacteristicValue):
+            parts.append(f"bool:{b.characteristic.name}={b.value}")
+        elif isinstance(b, StringCharacteristicValue):
+            parts.append(f"str:{b.characteristic.name}={b.value}")
+        else:  # NumericalCharacteristicValueBand
+            lo = f"{b.minValue:g}" if b.minValue is not None else ""
+            hi = f"{b.maxValue:g}" if b.maxValue is not None else ""
+            parts.append(f"num:{b.characteristic.name}:[{lo}..{hi}]")
+    bands_str = ";".join(sorted(parts))
+    return f"characteristicBand|{concern.facetOfProsperity}|{concern.outlook}|{bands_str}"
+
+
+def extract_moral_concerns_from_dilemma(dilemma: Dilemma) -> list:
+    """
+    Recursively traverses all effects (including chainEffects) in a dilemma and
+    extracts unique MoralConcerns, one per distinct group-membership type ×
+    facet × outlook combination.
+
+    - demographicMemberships  → DemographicMoralConcern (keyed by demographic name)
+    - characteristicBandMemberships → CharacteristicBandMoralConcern
+    - individuals → CharacteristicBandMoralConcern built from declared values
+      (numericalValues become exact [v, v] bands)
+    """
+    from .models import NumericalCharacteristicPoint  # local import to avoid circularity issues
+
+    seen: dict[str, object] = {}
+
+    def visit_effect(effect: Effect) -> None:
+        facet = effect.facetOfProsperity
+        outlook = effect.outlook
+        group = effect.affectedGroup
+
+        for dm in (group.demographicMemberships or []):
+            concern = DemographicMoralConcern(
+                demographic=dm.demographic,
+                facetOfProsperity=facet,
+                outlook=outlook,
+            )
+            key = _concern_key(concern)
+            if key not in seen:
+                seen[key] = concern
+
+        for cbm in (group.characteristicBandMemberships or []):
+            concern = CharacteristicBandMoralConcern(
+                characteristicBands=cbm.characteristicBands,
+                facetOfProsperity=facet,
+                outlook=outlook,
+            )
+            key = _concern_key(concern)
+            if key not in seen:
+                seen[key] = concern
+
+        for individual in (group.individuals or []):
+            bands: list = []
+            for bv in (individual.booleanValues or []):
+                bands.append(bv)
+            for sv in (individual.stringValues or []):
+                bands.append(sv)
+            for nv in (individual.numericalValues or []):
+                bands.append(
+                    NumericalCharacteristicValueBand(
+                        characteristic=nv.characteristic,
+                        minValue=nv.value,
+                        maxValue=nv.value,
+                    )
+                )
+            if not bands:
+                continue
+            concern = CharacteristicBandMoralConcern(
+                characteristicBands=bands,
+                facetOfProsperity=facet,
+                outlook=outlook,
+            )
+            key = _concern_key(concern)
+            if key not in seen:
+                seen[key] = concern
+
+        for chain in (effect.chainEffects or []):
+            visit_effect(chain)
+
+    for choice in dilemma.choices:
+        for effect in choice.effects:
+            visit_effect(effect)
+
+    return list(seen.values())
+
+
+def _build_contribution_matrix(
+    dilemma: Dilemma,
+    concerns: list,
+    optimism_bias: float,
+) -> list[list[float]]:
+    """
+    Returns A where A[i][k] = contribution of concern k (at unit importance = 1)
+    to the moral valence of choice i.  Reuses calculate_weighted_net_benefit and
+    calculate_importance.
+    """
+    n = len(dilemma.choices)
+    m = len(concerns)
+    A = [[0.0] * m for _ in range(n)]
+
+    def contribution_of_effect(effect: Effect, choice_idx: int) -> None:
+        for k, concern in enumerate(concerns):
+            if (
+                concern.facetOfProsperity == effect.facetOfProsperity
+                and concern.outlook == effect.outlook
+            ):
+                from .models import MoralPriority as MP  # local to avoid name clash
+                wnb = calculate_weighted_net_benefit(effect.possibleBenefits, optimism_bias)
+                unit_priority = MP(moralConcern=concern, importance=1.0)
+                imp = calculate_importance(effect.affectedGroup, unit_priority)
+                A[choice_idx][k] += wnb * imp
+        for chain in (effect.chainEffects or []):
+            contribution_of_effect(chain, choice_idx)
+
+    for i, choice in enumerate(dilemma.choices):
+        for effect in choice.effects:
+            contribution_of_effect(effect, i)
+
+    return A
+
+
+def _gaussian_elimination(C: list[list[float]], d: list[float]) -> list[float] | None:
+    """
+    Partial-pivot Gaussian elimination solving C·x = d.
+    Returns x, or None if the system is singular (pivot < 1e-12).
+    """
+    m = len(d)
+    # Augmented matrix
+    aug = [row[:] + [d[i]] for i, row in enumerate(C)]
+
+    for col in range(m):
+        # Find pivot
+        pivot_row = col
+        pivot_val = abs(aug[col][col])
+        for row in range(col + 1, m):
+            if abs(aug[row][col]) > pivot_val:
+                pivot_val = abs(aug[row][col])
+                pivot_row = row
+        if pivot_val < 1e-12:
+            return None
+        aug[col], aug[pivot_row] = aug[pivot_row], aug[col]
+        scale = aug[col][col]
+        for j in range(col, m + 1):
+            aug[col][j] /= scale
+        for row in range(m):
+            if row == col:
+                continue
+            factor = aug[row][col]
+            for j in range(col, m + 1):
+                aug[row][j] -= factor * aug[col][j]
+
+    return [aug[i][m] for i in range(m)]
+
+
+def infer_moral_priorities(
+    dilemma: Dilemma,
+    stated_preferabilities: list[StatedPreferability],
+    optimism_bias: float = 0.0,
+) -> list:
+    """
+    Infers moral priorities (importance weights in [0, 1]) from the preferabilities
+    assigned to choices in a moral dilemma.
+
+    Algorithm:
+    1. Auto-extract candidate MoralConcerns from the dilemma's effects.
+    2. Build contribution matrix A (n_choices × n_concerns), where A[i][k] is the
+       contribution of concern k at unit importance to the moral valence of choice i.
+    3. Solve for the importance vector x (clamped to [0, 1]):
+       - Over-determined (m ≤ n): least-squares via normal equations (A^T A)·x = A^T·b.
+         Zero-diagonal columns (zero-contribution concerns) are assigned importance 0.
+       - Under-determined (m > n): minimum-norm solution via (A A^T)·y = b, x = A^T·y.
+         This gives the shortest importance vector that is consistent with the
+         stated preferabilities.
+
+    Returns a list of MoralPriority with inferred importance values.
+    """
+    from .models import MoralPriority as MP
+
+    concerns = extract_moral_concerns_from_dilemma(dilemma)
+    m = len(concerns)
+    if m == 0:
+        return []
+
+    stated_map = {s.choiceName: int(s.statedPreferability) for s in stated_preferabilities}
+    n = len(dilemma.choices)
+    b = [stated_map.get(c.name, 4) for c in dilemma.choices]  # default: Neutral (4)
+
+    A = _build_contribution_matrix(dilemma, concerns, optimism_bias)
+
+    # Check if A is all zeros
+    if all(A[i][k] == 0.0 for i in range(n) for k in range(m)):
+        return [MP(moralConcern=c, importance=0.0) for c in concerns]
+
+    importances = [0.0] * m
+
+    if m <= n:
+        # Over-determined: least-squares via normal equations (A^T A)·x = A^T·b
+        AtA = [[sum(A[i][k] * A[i][j] for i in range(n)) for j in range(m)] for k in range(m)]
+        Atb = [sum(A[i][k] * b[i] for i in range(n)) for k in range(m)]
+
+        # Identify zero-diagonal (zero-contribution) columns
+        zero_cols = {k for k in range(m) if AtA[k][k] < 1e-24}
+        active_idxs = [k for k in range(m) if k not in zero_cols]
+
+        if active_idxs:
+            AtA_r = [[AtA[ri][ci] for ci in active_idxs] for ri in active_idxs]
+            Atb_r = [Atb[ri] for ri in active_idxs]
+            solved = _gaussian_elimination(AtA_r, Atb_r)
+            if solved:
+                for ii, k in enumerate(active_idxs):
+                    importances[k] = min(1.0, max(0.0, solved[ii]))
+    else:
+        # Under-determined: minimum-norm solution via (A A^T)·y = b, then x = A^T·y
+        AAt = [[sum(A[i][k] * A[j][k] for k in range(m)) for j in range(n)] for i in range(n)]
+        solved_y = _gaussian_elimination(AAt, list(b))
+        if solved_y is not None:
+            for k in range(m):
+                val = sum(A[i][k] * solved_y[i] for i in range(n))
+                importances[k] = min(1.0, max(0.0, val))
+
+    return [MP(moralConcern=c, importance=importances[k]) for k, c in enumerate(concerns)]
+
+
+def calculate_moral_priority_divergence_signal(
+    purported_priorities: list,
+    inferred_priorities: list,
+) -> MoralPriorityDivergenceSignal:
+    """
+    Compares purported moral priorities (from an explicit ethic) against moral priorities
+    inferred from stated preferabilities, producing a per-concern divergence signal.
+
+    Matching rules:
+    - DemographicMoralConcern: matched by demographic.name + facet + outlook
+    - CharacteristicBandMoralConcern: matched by facet + outlook + sorted band keys
+
+    If an inferred concern has no matching purported priority, purportedImportance = 0.
+    """
+    # Build lookup from concern key → normalized purported importance
+    purported_map: dict[str, float] = {}
+    for pp in purported_priorities:
+        imp = pp.importance
+        if isinstance(imp, int):
+            normalized = imp / 7.0
+        else:
+            f = float(imp)
+            normalized = f / 7.0 if f > 1.0 else f
+        purported_map[_concern_key(pp.moralConcern)] = normalized
+
+    per_concern: list[MoralPriorityDivergenceResult] = []
+    for ip in inferred_priorities:
+        key = _concern_key(ip.moralConcern)
+        purported = purported_map.get(key, 0.0)
+        inferred = float(ip.importance)
+        signed = purported - inferred
+        per_concern.append(MoralPriorityDivergenceResult(
+            moralConcern=ip.moralConcern,
+            purportedImportance=purported,
+            inferredImportance=inferred,
+            signedDivergence=signed,
+            absoluteDivergence=abs(signed),
+        ))
+
+    mean = sum(r.absoluteDivergence for r in per_concern) / len(per_concern) if per_concern else 0.0
+    return MoralPriorityDivergenceSignal(perConcern=per_concern, meanAbsoluteDivergence=mean)
+
+
+# ---------------------------------------------------------------------------
 # Worked example — builds all models from scratch
 # ---------------------------------------------------------------------------
 
@@ -712,9 +996,6 @@ def _build_worked_example():
 
 if __name__ == "__main__":
     dilemma, ethic, stated = _build_worked_example()
-
-    print("=" * 65)
-    print("MORAL VALENCES")
     print("=" * 65)
     valences = calculate_all_moral_valences(dilemma, ethic)
     max_v = max(valences.values())

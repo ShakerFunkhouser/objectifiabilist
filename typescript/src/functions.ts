@@ -2,14 +2,13 @@
 // Ported from Python functions.py
 import {
   PossibleBenefit,
-  QualitativeMagnitude,
   QualitativePreferability,
   Group,
   MoralPriority,
+  MoralConcern,
   DemographicMoralConcern,
   CharacteristicBandMoralConcern,
   IndividualMember,
-  Demographic,
   BooleanCharacteristicValue,
   StringCharacteristicValue,
   NumericalCharacteristicValueBand,
@@ -18,6 +17,9 @@ import {
   Choice,
   Dilemma,
   DivergenceResult,
+  StatedPreferability,
+  MoralPriorityDivergenceResult,
+  MoralPriorityDivergenceSignal,
 } from "./types";
 
 // Step 1: Resolve benefit magnitude to a normalized float in [0, 1]
@@ -202,11 +204,7 @@ function individualSatisfiesDemographic(
 }
 
 function importanceWeight(priority: MoralPriority): number {
-  const imp = priority.importance;
-  if (typeof imp === "number" && Number.isInteger(imp)) {
-    return imp / 7.0;
-  }
-  const f = Number(imp);
+  const f = Number(priority.importance);
   if (f > 1.0) return f / 7.0;
   return f;
 }
@@ -381,4 +379,332 @@ export function isActionPermitted(
   ordainedEthic: Ethic,
 ): boolean {
   return choiceName === getPrescribedChoice(dilemma, ordainedEthic);
+}
+
+// ---------------------------------------------------------------------------
+// Moral priority inference
+// ---------------------------------------------------------------------------
+
+/** Stable string key uniquely identifying a MoralConcern. */
+function concernKey(concern: MoralConcern): string {
+  if (concern.kind === "demographic") {
+    return `demographic|${concern.facetOfProsperity}|${concern.outlook}|${concern.demographic.name}`;
+  }
+  const bands = concern.characteristicBands
+    .map((b) => {
+      if ("value" in b && typeof b.value === "boolean")
+        return `bool:${b.characteristic.name}=${b.value}`;
+      if ("value" in b && typeof b.value === "string")
+        return `str:${b.characteristic.name}=${b.value}`;
+      const nb = b as NumericalCharacteristicValueBand;
+      return `num:${nb.characteristic.name}:[${nb.minValue ?? ""}..${nb.maxValue ?? ""}]`;
+    })
+    .sort()
+    .join(";");
+  return `characteristicBand|${concern.facetOfProsperity}|${concern.outlook}|${bands}`;
+}
+
+/**
+ * Recursively traverses all effects (including chainEffects) in a dilemma and
+ * extracts unique MoralConcerns, one per distinct group-membership type ×
+ * facet × outlook combination.
+ *
+ * - demographicMemberships  → DemographicMoralConcern (keyed by demographic name)
+ * - characteristicBandMemberships → CharacteristicBandMoralConcern
+ * - individuals → CharacteristicBandMoralConcern built from their declared values
+ *   (numericalValues become exact [v, v] bands)
+ */
+export function extractMoralConcernsFromDilemma(
+  dilemma: Dilemma,
+): MoralConcern[] {
+  const seen = new Map<string, MoralConcern>();
+
+  function visitEffect(effect: Effect): void {
+    const { affectedGroup, facetOfProsperity, outlook } = effect;
+
+    for (const dm of affectedGroup.demographicMemberships ?? []) {
+      const concern: DemographicMoralConcern = {
+        kind: "demographic",
+        demographic: dm.demographic,
+        facetOfProsperity,
+        outlook,
+      };
+      const key = concernKey(concern);
+      if (!seen.has(key)) seen.set(key, concern);
+    }
+
+    for (const cbm of affectedGroup.characteristicBandMemberships ?? []) {
+      const concern: CharacteristicBandMoralConcern = {
+        kind: "characteristicBand",
+        characteristicBands: cbm.characteristicBands,
+        facetOfProsperity,
+        outlook,
+      };
+      const key = concernKey(concern);
+      if (!seen.has(key)) seen.set(key, concern);
+    }
+
+    for (const individual of affectedGroup.individuals ?? []) {
+      const bands: (
+        | BooleanCharacteristicValue
+        | StringCharacteristicValue
+        | NumericalCharacteristicValueBand
+      )[] = [];
+      for (const bv of individual.booleanValues ?? []) bands.push(bv);
+      for (const sv of individual.stringValues ?? []) bands.push(sv);
+      for (const nv of individual.numericalValues ?? []) {
+        bands.push({
+          characteristic: nv.characteristic,
+          minValue: nv.value,
+          maxValue: nv.value,
+        });
+      }
+      if (bands.length === 0) continue;
+      const concern: CharacteristicBandMoralConcern = {
+        kind: "characteristicBand",
+        characteristicBands: bands,
+        facetOfProsperity,
+        outlook,
+      };
+      const key = concernKey(concern);
+      if (!seen.has(key)) seen.set(key, concern);
+    }
+
+    for (const chain of effect.chainEffects ?? []) visitEffect(chain);
+  }
+
+  for (const choice of dilemma.choices) {
+    for (const effect of choice.effects) visitEffect(effect);
+  }
+
+  return Array.from(seen.values());
+}
+
+/**
+ * Builds the contribution matrix A where A[i][k] is the total weighted net-benefit
+ * that concern k (at unit importance = 1) contributes to choice i's moral valence.
+ * Reuses calculateWeightedNetBenefit and calculateImportance.
+ */
+function buildContributionMatrix(
+  dilemma: Dilemma,
+  concerns: MoralConcern[],
+  optimismBias: number,
+): number[][] {
+  const n = dilemma.choices.length;
+  const m = concerns.length;
+  const A: number[][] = Array.from({ length: n }, () => new Array(m).fill(0));
+
+  function contributionOfEffect(effect: Effect, choiceIdx: number): void {
+    for (let k = 0; k < m; k++) {
+      const concern = concerns[k];
+      if (
+        concern.facetOfProsperity === effect.facetOfProsperity &&
+        concern.outlook === effect.outlook
+      ) {
+        const wnb = calculateWeightedNetBenefit(
+          effect.possibleBenefits,
+          optimismBias,
+        );
+        const unitPriority: MoralPriority = {
+          moralConcern: concern,
+          importance: 1.0,
+        };
+        const imp = calculateImportance(effect.affectedGroup, unitPriority);
+        A[choiceIdx][k] += wnb * imp;
+      }
+    }
+    for (const chain of effect.chainEffects ?? []) {
+      contributionOfEffect(chain, choiceIdx);
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    for (const effect of dilemma.choices[i].effects) {
+      contributionOfEffect(effect, i);
+    }
+  }
+
+  return A;
+}
+
+/** Partial-pivot Gaussian elimination. Solves C·x = d in-place; returns x or null if singular. */
+function gaussianElimination(C: number[][], d: number[]): number[] | null {
+  const m = d.length;
+  // Augmented matrix [C | d]
+  const aug: number[][] = C.map((row, i) => [...row, d[i]]);
+
+  for (let col = 0; col < m; col++) {
+    // Find pivot
+    let pivotRow = col;
+    let pivotVal = Math.abs(aug[col][col]);
+    for (let row = col + 1; row < m; row++) {
+      if (Math.abs(aug[row][col]) > pivotVal) {
+        pivotVal = Math.abs(aug[row][col]);
+        pivotRow = row;
+      }
+    }
+    if (pivotVal < 1e-12) return null; // singular column
+    // Swap
+    [aug[col], aug[pivotRow]] = [aug[pivotRow], aug[col]];
+    // Eliminate
+    const scale = aug[col][col];
+    for (let j = col; j <= m; j++) aug[col][j] /= scale;
+    for (let row = 0; row < m; row++) {
+      if (row === col) continue;
+      const factor = aug[row][col];
+      for (let j = col; j <= m; j++) aug[row][j] -= factor * aug[col][j];
+    }
+  }
+
+  return aug.map((row) => row[m]);
+}
+
+/**
+ * Infers moral priorities (as importance weights in [0, 1]) from the preferabilities
+ * assigned to choices in a moral dilemma.
+ *
+ * Algorithm:
+ * 1. Auto-extract candidate MoralConcerns from the dilemma's effects.
+ * 2. Build contribution matrix A (n_choices × n_concerns), where A[i][k] is the
+ *    contribution of concern k at unit importance to the moral valence of choice i.
+ * 3. Solve for the importance vector x (clamped to [0, 1]):
+ *    - Over-determined (m ≤ n): least-squares via normal equations (A^T A)·x = A^T·b.
+ *      Zero-diagonal columns (zero-contribution concerns) are assigned importance 0.
+ *    - Under-determined (m > n): minimum-norm solution via (A A^T)·y = b, x = A^T·y.
+ *      This gives the shortest importance vector consistent with the stated preferabilities.
+ *
+ * Returns one MoralPriority per extracted concern with inferred importance.
+ */
+export function inferMoralPriorities(
+  dilemma: Dilemma,
+  statedPreferabilities: StatedPreferability[],
+  optimismBias: number = 0.0,
+): MoralPriority[] {
+  const concerns = extractMoralConcernsFromDilemma(dilemma);
+  const m = concerns.length;
+  if (m === 0) return [];
+
+  const statedMap: Record<string, number> = {};
+  for (const s of statedPreferabilities)
+    statedMap[s.choiceName] = s.statedPreferability;
+
+  const n = dilemma.choices.length;
+  // b[i] = stated ordinal for choice i (default: 4 = Neutral)
+  const b: number[] = dilemma.choices.map((c) => statedMap[c.name] ?? 4);
+
+  const A = buildContributionMatrix(dilemma, concerns, optimismBias);
+
+  // Check if A is all zeros
+  const allZero = A.every((row) => row.every((v) => v === 0));
+  if (allZero) {
+    return concerns.map((concern) => ({
+      moralConcern: concern,
+      importance: 0,
+    }));
+  }
+
+  const importances = new Array<number>(m).fill(0);
+
+  if (m <= n) {
+    // Over-determined: least-squares via normal equations (A^T A) x = A^T b
+    const AtA: number[][] = Array.from({ length: m }, () =>
+      new Array(m).fill(0),
+    );
+    const Atb: number[] = new Array(m).fill(0);
+    for (let k = 0; k < m; k++) {
+      for (let j = 0; j < m; j++) {
+        for (let i = 0; i < n; i++) AtA[k][j] += A[i][k] * A[i][j];
+      }
+      for (let i = 0; i < n; i++) Atb[k] += A[i][k] * b[i];
+    }
+
+    // Handle columns that are entirely zero (concern has no traction in this dilemma)
+    const zeroColumns = new Set<number>();
+    for (let k = 0; k < m; k++) {
+      if (AtA[k][k] < 1e-24) zeroColumns.add(k);
+    }
+    const activeIdxs = Array.from({ length: m }, (_, i) => i).filter(
+      (i) => !zeroColumns.has(i),
+    );
+    if (activeIdxs.length > 0) {
+      const AtA_r = activeIdxs.map((ri) => activeIdxs.map((ci) => AtA[ri][ci]));
+      const Atb_r = activeIdxs.map((ri) => Atb[ri]);
+      const solved = gaussianElimination(AtA_r, Atb_r);
+      if (solved) {
+        for (let ii = 0; ii < activeIdxs.length; ii++) {
+          importances[activeIdxs[ii]] = Math.min(1, Math.max(0, solved[ii]));
+        }
+      }
+    }
+  } else {
+    // Under-determined: minimum-norm solution via (A A^T)·y = b, then x = A^T·y
+    const AAt: number[][] = Array.from({ length: n }, () =>
+      new Array(n).fill(0),
+    );
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        for (let k = 0; k < m; k++) AAt[i][j] += A[i][k] * A[j][k];
+      }
+    }
+    const solvedY = gaussianElimination(AAt, [...b]);
+    if (solvedY) {
+      for (let k = 0; k < m; k++) {
+        let val = 0;
+        for (let i = 0; i < n; i++) val += A[i][k] * solvedY[i];
+        importances[k] = Math.min(1, Math.max(0, val));
+      }
+    }
+  }
+
+  return concerns.map((concern, k) => ({
+    moralConcern: concern,
+    importance: importances[k],
+  }));
+}
+
+/**
+ * Compares purported moral priorities (from an explicit ethic) against moral priorities
+ * inferred from stated preferabilities, producing a per-concern divergence signal.
+ *
+ * Matching rules:
+ * - DemographicMoralConcern: matched by demographic.name + facet + outlook
+ * - CharacteristicBandMoralConcern: matched by facet + outlook + sorted band keys
+ *
+ * If an inferred concern has no matching purported priority, purportedImportance = 0.
+ */
+export function calculateMoralPriorityDivergenceSignal(
+  purportedPriorities: MoralPriority[],
+  inferredPriorities: MoralPriority[],
+): MoralPriorityDivergenceSignal {
+  // Build lookup from concern key → normalized purported importance
+  const purportedMap = new Map<string, number>();
+  for (const pp of purportedPriorities) {
+    const imp = pp.importance;
+    const normalized =
+      typeof imp === "number" && imp > 1.0 ? imp / 7.0 : Number(imp);
+    purportedMap.set(concernKey(pp.moralConcern), normalized);
+  }
+
+  const perConcern: MoralPriorityDivergenceResult[] = [];
+  for (const ip of inferredPriorities) {
+    const key = concernKey(ip.moralConcern);
+    const purported = purportedMap.get(key) ?? 0;
+    const inferred = ip.importance;
+    const signed = purported - inferred;
+    perConcern.push({
+      moralConcern: ip.moralConcern,
+      purportedImportance: purported,
+      inferredImportance: inferred,
+      signedDivergence: signed,
+      absoluteDivergence: Math.abs(signed),
+    });
+  }
+
+  const mean =
+    perConcern.length > 0
+      ? perConcern.reduce((s, r) => s + r.absoluteDivergence, 0) /
+        perConcern.length
+      : 0;
+
+  return { perConcern, meanAbsoluteDivergence: mean };
 }

@@ -363,3 +363,29 @@ export type SEJPOutput = {
     statedPreferability: QualitativePreferability;
   }>;
 };
+
+// ---------------------------------------------------------------------------
+// Moral priority inference results
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-concern result comparing a purported (stated) importance against the importance
+ * inferred from the preferabilities assigned to choices in a moral dilemma.
+ * Positive signedDivergence = purported importance overstated relative to what
+ * the stated preferabilities imply.
+ */
+export type MoralPriorityDivergenceResult = {
+  moralConcern: MoralConcern;
+  /** Importance drawn from the purported ethic, normalized to [0, 1]. 0 if concern has no matching purported priority. */
+  purportedImportance: number;
+  /** Importance inferred from stated preferabilities, normalized to [0, 1]. */
+  inferredImportance: number;
+  /** purportedImportance − inferredImportance */
+  signedDivergence: number;
+  absoluteDivergence: number;
+};
+
+export type MoralPriorityDivergenceSignal = {
+  perConcern: MoralPriorityDivergenceResult[];
+  meanAbsoluteDivergence: number;
+};
