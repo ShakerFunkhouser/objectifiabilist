@@ -13,7 +13,7 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
@@ -24,23 +24,34 @@ Signage = Literal["positive", "negative", "zero"]
 
 
 class QualitativeMagnitude(IntEnum):
-    Negligible = 1
-    VeryLow = 2
-    SomewhatLow = 3
-    Moderate = 4
-    SomewhatHigh = 5
-    VeryHigh = 6
-    ExtremelyHigh = 7
+    Negligible = 0
+    VeryLow = 1
+    SomewhatLow = 2
+    Moderate = 3
+    SomewhatHigh = 4
+    VeryHigh = 5
+    ExtremelyHigh = 6
 
 
 class QualitativePreferability(IntEnum):
-    ExtremelyUnpreferable = 1
-    VeryUnpreferable = 2
-    SomewhatUnpreferable = 3
-    Neutral = 4
-    SomewhatPreferable = 5
-    VeryPreferable = 6
-    ExtremelyPreferable = 7
+    ExtremelyUnpreferable = 0
+    VeryUnpreferable = 1
+    SomewhatUnpreferable = 2
+    Neutral = 3
+    SomewhatPreferable = 4
+    VeryPreferable = 5
+    ExtremelyPreferable = 6
+
+
+class QualitativeDifferenceMagnitude(IntEnum):
+    """Qualitative difference between adjacent moral priorities or preferabilities (Table 3)."""
+    EquallyImportant = 0
+    MarginallyMoreOrLessPreferable = 1
+    SlightlyMoreOrLessPreferable = 2
+    ConsiderablyMoreOrLessPreferable = 3
+    MuchMoreOrLessPreferable = 4
+    GreatlyMoreOrLessPreferable = 5
+    OverwhelminglyMoreOrLess = 6
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +81,13 @@ class NumericalCharacteristic(BaseModel):
     minValue: Optional[float] = None
     maxValue: Optional[float] = None
     defaultValue: Optional[float] = None
+
+
+class ProsperityCharacteristic(BaseModel):
+    """A dimension of well-being (e.g. health, wealth, autonomy). """
+    kind: Literal["prosperity"] = "prosperity"
+    name: str
+    description: Optional[str] = None
 
 
 AnyCharacteristic = Annotated[
@@ -156,6 +174,11 @@ class Group(BaseModel):
     demographicMemberships: Optional[list[DemographicMembership]] = None
     characteristicBandMemberships: Optional[list[CharacteristicBandMembership]] = None
     individuals: Optional[list[IndividualMember]] = None
+    """Circumstantial importance adjustment applied additively to any moral priority that matches this group.
+    Positive = increased moral standing (e.g., relatedness). Negative = decreased (e.g., fault).
+    Per Section 2.1 of the academic paper, circumstantial characteristics like 'relatedness to agent'
+    and 'fault for the conflict arising' modify group importance as additive offsets."""
+    circumstantialAdjustment: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +192,10 @@ class PossibleBenefit(BaseModel):
     quantitativeMetric: Optional[str] = None
     signage: Signage
     description: Optional[str] = None
+    """Cascading effects triggered when this possible benefit occurs.
+    Weighted by this PB's likelihood in moral value calculations.
+    Per Section 3.2: H = l × [(b × M) + c] where c = Σ L_chain × A_chain."""
+    chainEffects: Optional[list["Effect"]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +207,11 @@ class Effect(BaseModel):
     facetOfProsperity: str
     outlook: str
     possibleBenefits: list[PossibleBenefit]
-    chainEffects: Optional[list["Effect"]] = None
+    """Probability that this effect transpires.  Defaults to 1.0 (certain).
+    Per Section 2.1 Definition 3: 'Each effect entails a likelihood, L.'
+    The moral value of the effect is multiplied by this likelihood when computing
+    the moral valence of the parent choice."""
+    likelihood: float = 1.0
 
 
 Effect.model_rebuild()
@@ -193,6 +224,8 @@ Effect.model_rebuild()
 class Choice(BaseModel):
     name: str
     description: Optional[str] = None
+    """Label for behavior-based proscription matching (see Ethic.proscribedBehaviors)."""
+    behavior: Optional[str] = None
     effects: list[Effect]
 
 
@@ -203,7 +236,7 @@ class Choice(BaseModel):
 class DemographicMoralConcern(BaseModel):
     kind: Literal["demographic"] = "demographic"
     demographic: Demographic
-    facetOfProsperity: str
+    facetOfProsperity: Union[str, ProsperityCharacteristic]
     outlook: str
 
 
@@ -212,7 +245,7 @@ class CharacteristicBandMoralConcern(BaseModel):
     characteristicBands: list[
         Union[BooleanCharacteristicValue, StringCharacteristicValue, NumericalCharacteristicValueBand]
     ]
-    facetOfProsperity: str
+    facetOfProsperity: Union[str, ProsperityCharacteristic]
     outlook: str
 
 
@@ -228,8 +261,40 @@ MoralConcern = Annotated[
 
 class MoralPriority(BaseModel):
     moralConcern: MoralConcern
-    # importance as QualitativeMagnitude ordinal (1–7) or raw float
+    # importance as QualitativeMagnitude ordinal (0–6) or raw float
     importance: Union[QualitativeMagnitude, float]
+    rank: Optional[int] = None
+    """Minimum qualitative status of benefit for this concern (§3.5.1)."""
+    minStatus: Optional[QualitativeMagnitude] = None
+    """Maximum qualitative status of benefit for this concern (§3.5.1)."""
+    maxStatus: Optional[QualitativeMagnitude] = None
+    overridingDuties: Optional[list[OverridingDuty]] = None
+    """Lower bound on inferred importance under simplified inverse (§3.10): m_d − W."""
+    importanceLowerBound: Optional[float] = None
+    """Upper bound on inferred importance under simplified inverse (§3.10): m_d + W."""
+    importanceUpperBound: Optional[float] = None
+
+
+class OverridingDuty(BaseModel):
+    """
+    A deontological constraint (§3.7).  When a choice benefits the
+    beneficiaryMoralConcern while imposing detriment on the moral concern
+    that owns this duty beyond the inviolability threshold, the choice
+    is prohibited.
+    """
+    beneficiaryMoralConcern: MoralConcern
+    """Detriment threshold at which the duty activates (evaluative activation)."""
+    obligatoryDetrimentThreshold: QualitativeMagnitude
+    """Beneficiary count at which detriment transitions from
+    supererogatory to obligatory. Default 1."""
+    supererogatoryBecomesObligatoryAtBeneficiaryCount: Optional[int] = None
+    """Detriment beyond which benefit to the beneficiary is prohibited.
+    Defaults to obligatoryDetrimentThreshold if not set."""
+    detrimentInviolabilityThreshold: Optional[QualitativeMagnitude] = None
+    """Beneficiary count at which the inviolability threshold relaxes,
+    making the detriment supererogatory instead of prohibited.
+    Must be ≤ supererogatoryBecomesObligatoryAtBeneficiaryCount."""
+    inviolabilityBecomesSupererogatoryAtBeneficiaryCount: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -247,10 +312,18 @@ class ConversionMetric(BaseModel):
 # ---------------------------------------------------------------------------
 
 class Ethic(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     name: str
     moralPriorities: list[MoralPriority]
-    optimismBias: float = 0.0
+    # CPT parameters (default values reproduce linear expected-value behaviour)
+    alpha: float = 1.0            # value function gain exponent
+    beta: float = 1.0             # value function loss exponent
+    lambda_: float = Field(default=1.0, alias="lambda")  # loss-aversion coefficient
+    gamma: float = 1.0            # probability-weighting curvature
+    ambiguityAversion: float = 0.5  # ambiguity parameter a ∈ [0, 1]
     conversionMetrics: Optional[list[ConversionMetric]] = None
+    """Behaviors that render a choice categorically inadmissible (§3.7)."""
+    proscribedBehaviors: Optional[list[str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -284,11 +357,23 @@ class DivergenceResult(BaseModel):
     calculatedOrdinal: int
     signedDivergence: int
     absoluteDivergence: int
+    """|signedDivergence| / k where k = 7 ordinals (§3.9)."""
+    normalizedDivergence: float
+
+
+DivergenceBand = Literal["negligible", "moderate", "substantial"]
 
 
 class DivergenceSignal(BaseModel):
     perChoice: list[DivergenceResult]
+    """Mean raw ordinal gap |O_purported − O_predicted| (legacy scale 0–6)."""
     meanAbsoluteDivergence: float
+    """Total prescriptive divergence D = Σ Δ_i (§3.9)."""
+    totalPrescriptiveDivergence: float
+    """Mean prescriptive divergence Δ̄ = D / n (§3.9)."""
+    meanPrescriptiveDivergence: float
+    """Heuristic interpretive band for Δ̄ (§3.9)."""
+    prescriptiveDivergenceBand: DivergenceBand
 
 
 # ---------------------------------------------------------------------------
@@ -323,4 +408,75 @@ class MoralPriorityDivergenceResult(BaseModel):
 
 class MoralPriorityDivergenceSignal(BaseModel):
     perConcern: list[MoralPriorityDivergenceResult]
+    """Mean |δ_k| on normalized importances (alias for meanNormativeDivergence)."""
     meanAbsoluteDivergence: float
+    """Total normative divergence N = Σ|δ_k| (§3.11)."""
+    totalNormativeDivergence: float
+    """Mean normative divergence N̄ = N / d (§3.11)."""
+    meanNormativeDivergence: float
+    """Heuristic interpretive band for N̄ (§3.11)."""
+    normativeDivergenceBand: DivergenceBand
+
+
+# ---------------------------------------------------------------------------
+# Moral priority inference — polytope approach
+# ---------------------------------------------------------------------------
+
+# §3.8 / Table 4 constants (academic paper).
+PREFERABILITY_ORDINAL_COUNT = 7
+PREFERABILITY_BUCKET_WIDTH = 1 / 7
+W_UNPREF = 0.43  # upper bound of below-neutral region in Table 4
+
+# The 7 preferability ordinals (0–6) map to equal-width absolute-preferability buckets [0, 1].
+# Bucket width ≈ 1/7 ≈ 0.143.  See Table 4 of the academic paper.
+_PREFERABILITY_BUCKETS: dict[int, tuple[float, float]] = {
+    0: (0.00, 0.15),  # Extremely unpreferable
+    1: (0.15, 0.29),  # Very unpreferable
+    2: (0.29, 0.43),  # Somewhat unpreferable
+    3: (0.43, 0.57),  # Neutral
+    4: (0.57, 0.71),  # Somewhat preferable
+    5: (0.71, 0.85),  # Very preferable
+    6: (0.85, 1.00),  # Extremely preferable
+}
+
+
+def get_preferability_bounds(ordinal: int | QualitativePreferability) -> tuple[float, float]:
+    """Return (P_min, P_max) absolute-preferability interval for a stated preferability ordinal (0–6).
+
+    Uses the absolute-preferability proxy from Table 2 of the academic paper,
+    where each ordinal maps to an equal-width bucket in [0, 1].
+    """
+    o = int(ordinal)
+    return _PREFERABILITY_BUCKETS.get(o, (0.0, 1.0))
+
+
+def classify_divergence_band(mean_divergence: float) -> DivergenceBand:
+    """Heuristic interpretive bands for mean prescriptive/normative divergence (§3.9, §3.11)."""
+    if mean_divergence < 0.05:
+        return "negligible"
+    if mean_divergence < 0.20:
+        return "moderate"
+    return "substantial"
+
+
+class PerConcernBounds(BaseModel):
+    """Upper and lower bounds for a single moral concern's implied importance."""
+    moralConcern: MoralConcern
+    minImportance: float
+    maxImportance: float
+    centroid: float  # (min + max) / 2
+
+
+class PolytopeInferenceResult(BaseModel):
+    """Result of the polytope approach to moral priority inference.
+
+    For each concern, reports the feasible importance range [min, max]
+    consistent with ALL stated preferability intervals.
+    When the system is under-determined (m > n) the ranges may be wide;
+    when over-determined the feasible polytope may be empty.
+    """
+    perConcern: list[PerConcernBounds]
+    """Whether any feasible solution exists for the stated constraints."""
+    feasible: bool
+    """Mean of centroid values across all concerns (normalized)."""
+    meanCentroidImportance: float

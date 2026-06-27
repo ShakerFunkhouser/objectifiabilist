@@ -2,6 +2,8 @@
 // Ported from Python functions.py
 import {
   PossibleBenefit,
+  ProsperityCharacteristic,
+  QualitativeMagnitude,
   QualitativePreferability,
   Group,
   MoralPriority,
@@ -17,9 +19,14 @@ import {
   Choice,
   Dilemma,
   DivergenceResult,
+  DivergenceSignal,
   StatedPreferability,
   MoralPriorityDivergenceResult,
   MoralPriorityDivergenceSignal,
+  classifyDivergenceBand,
+  PREFERABILITY_ORDINAL_COUNT,
+  PREFERABILITY_BUCKET_WIDTH,
+  W_UNPREF,
 } from "./types";
 
 // Step 1: Resolve benefit magnitude to a normalized float in [0, 1]
@@ -34,9 +41,14 @@ function resolveMagnitude(benefit: PossibleBenefit): number {
     benefit.qualitativeMagnitude !== undefined &&
     benefit.qualitativeMagnitude !== null
   ) {
-    return benefit.qualitativeMagnitude / 7.0;
+    return benefit.qualitativeMagnitude / 6.0;
   }
   return 0.0;
+}
+
+/** Extract the plain name from a facet, whether string or ProsperityCharacteristic. */
+function facetName(facet: string | ProsperityCharacteristic): string {
+  return typeof facet === "string" ? facet : facet.name;
 }
 
 function signedMagnitude(benefit: PossibleBenefit): number {
@@ -46,31 +58,76 @@ function signedMagnitude(benefit: PossibleBenefit): number {
   return mag;
 }
 
+/**
+ * Compute raw benefit considering ideal state (minStatus/maxStatus) per §3.5.1.
+ *
+ * Range mode (both min and max specified, both non-zero):
+ *   b_res = b_incoming  (b_existing = 0 for now)
+ *   If b_min ≤ b_res ≤ b_max:   raw = 1  (100% progress toward ideal)
+ *   If b_res < b_min:           raw = 1 − (b_min − b_res) / b_min
+ *   If b_res > b_max:           raw = 1 − (b_res − b_max) / b_max
+ *
+ * Reference mode (only one specified, non-zero):
+ *   b_ref = the specified bound; raw = 1 − |b_ref − b_res| / b_ref
+ *
+ * No ideal state: returns b_incoming unchanged.
+ */
+function idealRawBenefit(bIncoming: number, priority: MoralPriority): number {
+  const bMinVal = priority.minStatus;
+  const bMaxVal = priority.maxStatus;
+
+  if (bMinVal === undefined && bMaxVal === undefined) return bIncoming;
+
+  const bMin = bMinVal !== undefined ? bMinVal / 6.0 : undefined;
+  const bMax = bMaxVal !== undefined ? bMaxVal / 6.0 : undefined;
+  const bRes = bIncoming;
+
+  if (bMin !== undefined && bMax !== undefined && bMin > 0 && bMax > 0) {
+    // Range mode
+    if (bRes >= bMin && bRes <= bMax) return 1.0;
+    if (bRes < bMin) return 1.0 - (bMin - bRes) / bMin;
+    return 1.0 - (bRes - bMax) / bMax;
+  }
+  // Reference mode
+  const bRef = bMin !== undefined ? bMin : bMax;
+  if (bRef !== undefined && bRef > 0) {
+    return 1.0 - Math.abs(bRef - bRes) / bRef;
+  }
+  return bIncoming;
+}
+
+// CPT helper functions
+function cptW(p: number, gamma: number): number {
+  if (gamma === 1.0) return p;
+  if (p <= 0) return 0;
+  if (p >= 1) return 1;
+  const pg = Math.pow(p, gamma);
+  return pg / Math.pow(pg + Math.pow(1 - p, gamma), 1 / gamma);
+}
+
+function cptV(b: number, alpha: number, beta: number, lambda: number): number {
+  if (b >= 0) return Math.pow(b, alpha);
+  return -(lambda * Math.pow(-b, beta));
+}
+
 // Step 2: Weighted net-benefit of an effect's distribution
 export function calculateWeightedNetBenefit(
   benefits: PossibleBenefit[],
-  optimismBias: number = 0.0,
+  alpha: number = 1.0,
+  beta: number = 1.0,
+  lambda: number = 1.0,
+  gamma: number = 1.0,
+  priority?: MoralPriority,
 ): number {
   if (!benefits || benefits.length === 0) return 0.0;
-  if (optimismBias === 0.0) {
-    return benefits.reduce(
-      (sum, b) => sum + b.likelihood * signedMagnitude(b),
-      0,
-    );
-  }
-  const signedMags = benefits.map(signedMagnitude);
-  const bestIdx = signedMags.reduce(
-    (best, val, idx, arr) => (val > arr[best] ? idx : best),
+  const rawFn = priority
+    ? (b: PossibleBenefit) => idealRawBenefit(signedMagnitude(b), priority)
+    : signedMagnitude;
+  return benefits.reduce(
+    (sum, b) =>
+      sum + cptW(b.likelihood, gamma) * cptV(rawFn(b), alpha, beta, lambda),
     0,
   );
-  let total = 0.0;
-  for (let i = 0; i < benefits.length; i++) {
-    const bestWeight = i === bestIdx ? 1.0 : 0.0;
-    const adjusted =
-      (1 - optimismBias) * benefits[i].likelihood + optimismBias * bestWeight;
-    total += adjusted * signedMags[i];
-  }
-  return total;
 }
 
 // Helper: check if a member's characteristic bands satisfy a concern band
@@ -205,7 +262,9 @@ function individualSatisfiesDemographic(
 
 function importanceWeight(priority: MoralPriority): number {
   const f = Number(priority.importance);
-  if (f > 1.0) return f / 7.0;
+  // Integer ordinals 0-6 from JSON deserialization: detect and normalise
+  if (Number.isInteger(f) && f >= 0 && f <= 6) return f / 6.0;
+  if (f > 1.0) return f / 6.0;
   return f;
 }
 
@@ -216,26 +275,39 @@ export function calculateImportance(
   const iw = importanceWeight(priority);
   const concern = priority.moralConcern;
   let total = 0.0;
+  let matched = false;
   if (concern.kind === "demographic") {
     if (group.demographicMemberships)
       for (const dm of group.demographicMemberships) {
-        if (dm.demographic.name === concern.demographic.name)
+        if (dm.demographic.name === concern.demographic.name) {
           total += iw * dm.count;
+          matched = true;
+        }
       }
     if (group.individuals)
       for (const member of group.individuals) {
-        if (individualSatisfiesDemographic(member, concern)) total += iw;
+        if (individualSatisfiesDemographic(member, concern)) {
+          total += iw;
+          matched = true;
+        }
       }
   } else if (concern.kind === "characteristicBand") {
     if (group.characteristicBandMemberships)
       for (const cbm of group.characteristicBandMemberships) {
-        if (cbmSatisfiesConcern(cbm, concern)) total += iw * cbm.count;
+        if (cbmSatisfiesConcern(cbm, concern)) {
+          total += iw * cbm.count;
+          matched = true;
+        }
       }
     if (group.individuals)
       for (const member of group.individuals) {
-        if (individualSatisfiesConcern(member, concern)) total += iw;
+        if (individualSatisfiesConcern(member, concern)) {
+          total += iw;
+          matched = true;
+        }
       }
   }
+  if (matched) total += group.circumstantialAdjustment ?? 0;
   return total;
 }
 
@@ -243,28 +315,48 @@ export function calculateMoralValueOfEffect(
   effect: Effect,
   ethic: Ethic,
 ): number {
-  const wnb = calculateWeightedNetBenefit(
-    effect.possibleBenefits,
-    ethic.optimismBias,
-  );
-  let totalImportance = 0.0;
+  const alpha = ethic.alpha ?? 1.0;
+  const beta = ethic.beta ?? 1.0;
+  const lambda = ethic.lambda ?? 1.0;
+  const gamma = ethic.gamma ?? 1.0;
+
+  // Root moral value: sum over matching priorities of M_k × WNB_k
+  let rootMoralValue = 0;
   for (const priority of ethic.moralPriorities) {
     const concern = priority.moralConcern;
     if (
-      concern.facetOfProsperity === effect.facetOfProsperity &&
+      facetName(concern.facetOfProsperity) ===
+        facetName(effect.facetOfProsperity) &&
       concern.outlook === effect.outlook
     ) {
-      totalImportance += calculateImportance(effect.affectedGroup, priority);
+      const Mk = calculateImportance(effect.affectedGroup, priority);
+      const wnbK = calculateWeightedNetBenefit(
+        effect.possibleBenefits,
+        alpha,
+        beta,
+        lambda,
+        gamma,
+        priority,
+      );
+      rootMoralValue += Mk * wnbK;
     }
   }
-  const rootMoralValue = wnb * totalImportance;
-  const chainValue = effect.chainEffects
-    ? effect.chainEffects.reduce(
+
+  // Chain value: C = Σ_j w(l_j) × c_j  where c_j = Σ_k A_chain_k
+  let chainValue = 0;
+  for (const pb of effect.possibleBenefits) {
+    if (pb.chainEffects && pb.chainEffects.length > 0) {
+      const wlj = cptW(pb.likelihood, gamma);
+      const cj = pb.chainEffects.reduce(
         (sum, chain) => sum + calculateMoralValueOfEffect(chain, ethic),
         0,
-      )
-    : 0;
-  return rootMoralValue + chainValue;
+      );
+      chainValue += wlj * cj;
+    }
+  }
+
+  const effectLikelihood = effect.likelihood ?? 1.0;
+  return effectLikelihood * (rootMoralValue + chainValue);
 }
 
 export function calculateMoralValence(choice: Choice, ethic: Ethic): number {
@@ -285,6 +377,33 @@ export function calculateAllMoralValences(
   return result;
 }
 
+export function calculateAbsolutePreferabilityQuantitative(
+  val: number,
+  minVal: number,
+  maxVal: number,
+): number {
+  if (maxVal > 0) {
+    if (val >= 0) return val / maxVal;
+    if (minVal < 0) return (val / minVal) * W_UNPREF;
+    return 0;
+  }
+  if (maxVal > minVal) {
+    return ((val - minVal) / (maxVal - minVal)) * W_UNPREF;
+  }
+  return 0;
+}
+
+function quantitativeToPreferabilityOrdinal(pAbs: number): number {
+  const p = Math.max(0, Math.min(1, pAbs));
+  if (p >= 0.85) return 6;
+  if (p >= 0.71) return 5;
+  if (p >= 0.57) return 4;
+  if (p >= 0.43) return 3;
+  if (p >= 0.29) return 2;
+  if (p >= 0.15) return 1;
+  return 0;
+}
+
 export function calculatePreferabilities(
   moralValences: Record<string, number>,
 ): Record<string, QualitativePreferability> {
@@ -293,19 +412,11 @@ export function calculatePreferabilities(
   const vals = Object.values(moralValences);
   const minVal = Math.min(...vals);
   const maxVal = Math.max(...vals);
-  const spread = maxVal - minVal;
   const result: Record<string, QualitativePreferability> = {};
   for (const name of keys) {
     const val = moralValences[name];
-    let bucket: number;
-    if (spread === 0) {
-      bucket = 4;
-    } else {
-      const normalized = (val - minVal) / spread;
-      bucket = Math.min(7, Math.max(1, Math.ceil(normalized * 7)));
-      if (bucket === 0) bucket = 1;
-    }
-    result[name] = bucket as QualitativePreferability;
+    const pAbs = calculateAbsolutePreferabilityQuantitative(val, minVal, maxVal);
+    result[name] = quantitativeToPreferabilityOrdinal(pAbs) as QualitativePreferability;
   }
   return result;
 }
@@ -316,29 +427,43 @@ export function calculateDivergenceSignal(
     statedPreferability: QualitativePreferability;
   }[],
   computed: Record<string, QualitativePreferability>,
-): { perChoice: DivergenceResult[]; meanAbsoluteDivergence: number } {
+): DivergenceSignal {
   const statedMap: Record<string, number> = {};
   for (const s of stated) statedMap[s.choiceName] = s.statedPreferability;
-  const perChoice = [];
+  const perChoice: DivergenceResult[] = [];
+  const k = PREFERABILITY_ORDINAL_COUNT;
   for (const choiceName in computed) {
     const calcPref = computed[choiceName];
     const statedOrd = statedMap[choiceName] ?? calcPref;
     const calcOrd = calcPref;
     const signed = statedOrd - calcOrd;
+    const absDiv = Math.abs(signed);
     perChoice.push({
       choiceName,
       statedOrdinal: statedOrd,
       calculatedOrdinal: calcOrd,
       signedDivergence: signed,
-      absoluteDivergence: Math.abs(signed),
+      absoluteDivergence: absDiv,
+      normalizedDivergence: absDiv / k,
     });
   }
+  const n = perChoice.length;
   const meanAbs =
-    perChoice.length > 0
-      ? perChoice.reduce((sum, r) => sum + r.absoluteDivergence, 0) /
-        perChoice.length
+    n > 0
+      ? perChoice.reduce((sum, r) => sum + r.absoluteDivergence, 0) / n
       : 0.0;
-  return { perChoice, meanAbsoluteDivergence: meanAbs };
+  const totalPrescriptive = perChoice.reduce(
+    (sum, r) => sum + r.normalizedDivergence,
+    0,
+  );
+  const meanPrescriptive = n > 0 ? totalPrescriptive / n : 0.0;
+  return {
+    perChoice,
+    meanAbsoluteDivergence: meanAbs,
+    totalPrescriptiveDivergence: totalPrescriptive,
+    meanPrescriptiveDivergence: meanPrescriptive,
+    prescriptiveDivergenceBand: classifyDivergenceBand(meanPrescriptive),
+  };
 }
 
 export function evaluateSejpOutput(output: {
@@ -373,12 +498,74 @@ export function getNamesOfChoicesSortedByDecreasingMoralValence(
   return Object.keys(valences).sort((a, b) => valences[b] - valences[a]);
 }
 
-export function isActionPermitted(
-  choiceName: string,
-  dilemma: Dilemma,
-  ordainedEthic: Ethic,
-): boolean {
-  return choiceName === getPrescribedChoice(dilemma, ordainedEthic);
+export function isActionPermitted(choice: Choice, ethic: Ethic): boolean {
+  // Check overriding duties (§3.7)
+  for (const priority of ethic.moralPriorities) {
+    for (const duty of priority.overridingDuties ?? []) {
+      const obligatedConcern = priority.moralConcern;
+      const beneficiaryConcern = duty.beneficiaryMoralConcern;
+
+      // Check if any effect benefits the beneficiary concern
+      let beneficiaryCount = 0;
+      let benefitsBeneficiary = false;
+      for (const effect of choice.effects) {
+        if (effectMatchesConcern(effect, beneficiaryConcern)) {
+          const wnb = calculateWeightedNetBenefit(
+            effect.possibleBenefits,
+            ethic.alpha ?? 1,
+            ethic.beta ?? 1,
+            ethic.lambda ?? 1,
+            ethic.gamma ?? 1,
+          );
+          if (wnb > 0) {
+            benefitsBeneficiary = true;
+            const unitPriority: MoralPriority = {
+              moralConcern: beneficiaryConcern,
+              importance: QualitativeMagnitude.ExtremelyHigh,
+            };
+            beneficiaryCount += Math.floor(
+              calculateImportance(effect.affectedGroup, unitPriority),
+            );
+          }
+        }
+      }
+      if (!benefitsBeneficiary) continue;
+
+      // Check if any effect harms the obligated concern
+      for (const effect of choice.effects) {
+        if (effectMatchesConcern(effect, obligatedConcern)) {
+          const wnb = calculateWeightedNetBenefit(
+            effect.possibleBenefits,
+            ethic.alpha ?? 1,
+            ethic.beta ?? 1,
+            ethic.lambda ?? 1,
+            ethic.gamma ?? 1,
+          );
+          if (wnb < 0) {
+            const bDetriment = Math.abs(wnb);
+            const eps =
+              duty.inviolabilityBecomesSupererogatoryAtBeneficiaryCount ?? 1;
+            const omega =
+              duty.supererogatoryBecomesObligatoryAtBeneficiaryCount ?? 1;
+            const bEff =
+              bDetriment / Math.max(beneficiaryCount, 1) / eps / omega;
+            const inviolability =
+              duty.detrimentInviolabilityThreshold ??
+              duty.obligatoryDetrimentThreshold;
+            if (bEff > inviolability / 6.0) return false;
+          }
+        }
+      }
+    }
+  }
+  return true;
+}
+
+function effectMatchesConcern(effect: Effect, concern: MoralConcern): boolean {
+  return (
+    facetName(concern.facetOfProsperity) ===
+      facetName(effect.facetOfProsperity) && concern.outlook === effect.outlook
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -387,8 +574,9 @@ export function isActionPermitted(
 
 /** Stable string key uniquely identifying a MoralConcern. */
 function concernKey(concern: MoralConcern): string {
+  const fname = facetName(concern.facetOfProsperity);
   if (concern.kind === "demographic") {
-    return `demographic|${concern.facetOfProsperity}|${concern.outlook}|${concern.demographic.name}`;
+    return `demographic|${fname}|${concern.outlook}|${concern.demographic.name}`;
   }
   const bands = concern.characteristicBands
     .map((b) => {
@@ -401,7 +589,7 @@ function concernKey(concern: MoralConcern): string {
     })
     .sort()
     .join(";");
-  return `characteristicBand|${concern.facetOfProsperity}|${concern.outlook}|${bands}`;
+  return `characteristicBand|${fname}|${concern.outlook}|${bands}`;
 }
 
 /**
@@ -470,7 +658,9 @@ export function extractMoralConcernsFromDilemma(
       if (!seen.has(key)) seen.set(key, concern);
     }
 
-    for (const chain of effect.chainEffects ?? []) visitEffect(chain);
+    for (const pb of effect.possibleBenefits ?? []) {
+      for (const chain of pb.chainEffects ?? []) visitEffect(chain);
+    }
   }
 
   for (const choice of dilemma.choices) {
@@ -488,33 +678,52 @@ export function extractMoralConcernsFromDilemma(
 function buildContributionMatrix(
   dilemma: Dilemma,
   concerns: MoralConcern[],
-  optimismBias: number,
+  alpha: number,
+  beta: number,
+  lambda: number,
+  gamma: number,
 ): number[][] {
   const n = dilemma.choices.length;
   const m = concerns.length;
   const A: number[][] = Array.from({ length: n }, () => new Array(m).fill(0));
 
-  function contributionOfEffect(effect: Effect, choiceIdx: number): void {
+  function contributionOfEffect(
+    effect: Effect,
+    choiceIdx: number,
+    pathWeight: number = 1.0,
+  ): void {
+    const weight = pathWeight * (effect.likelihood ?? 1.0);
     for (let k = 0; k < m; k++) {
       const concern = concerns[k];
       if (
-        concern.facetOfProsperity === effect.facetOfProsperity &&
+        facetName(concern.facetOfProsperity) ===
+          facetName(effect.facetOfProsperity) &&
         concern.outlook === effect.outlook
       ) {
         const wnb = calculateWeightedNetBenefit(
           effect.possibleBenefits,
-          optimismBias,
+          alpha,
+          beta,
+          lambda,
+          gamma,
         );
         const unitPriority: MoralPriority = {
           moralConcern: concern,
           importance: 1.0,
         };
         const imp = calculateImportance(effect.affectedGroup, unitPriority);
-        A[choiceIdx][k] += wnb * imp;
+        A[choiceIdx][k] += weight * wnb * imp;
       }
     }
-    for (const chain of effect.chainEffects ?? []) {
-      contributionOfEffect(chain, choiceIdx);
+    // Traverse chain effects on possible benefits
+    for (const pb of effect.possibleBenefits) {
+      for (const chain of pb.chainEffects ?? []) {
+        contributionOfEffect(
+          chain,
+          choiceIdx,
+          weight * cptW(pb.likelihood, gamma),
+        );
+      }
     }
   }
 
@@ -578,7 +787,10 @@ function gaussianElimination(C: number[][], d: number[]): number[] | null {
 export function inferMoralPriorities(
   dilemma: Dilemma,
   statedPreferabilities: StatedPreferability[],
-  optimismBias: number = 0.0,
+  alpha: number = 1.0,
+  beta: number = 1.0,
+  lambda: number = 1.0,
+  gamma: number = 1.0,
 ): MoralPriority[] {
   const concerns = extractMoralConcernsFromDilemma(dilemma);
   const m = concerns.length;
@@ -589,10 +801,19 @@ export function inferMoralPriorities(
     statedMap[s.choiceName] = s.statedPreferability;
 
   const n = dilemma.choices.length;
-  // b[i] = stated ordinal for choice i (default: 4 = Neutral)
-  const b: number[] = dilemma.choices.map((c) => statedMap[c.name] ?? 4);
+  // b[i] = stated ordinal / 6 (P^abs proxy; default: 3 = Neutral)
+  const b: number[] = dilemma.choices.map(
+    (c) => (statedMap[c.name] ?? 3) / 6.0,
+  );
 
-  const A = buildContributionMatrix(dilemma, concerns, optimismBias);
+  const A = buildContributionMatrix(
+    dilemma,
+    concerns,
+    alpha,
+    beta,
+    lambda,
+    gamma,
+  );
 
   // Check if A is all zeros
   const allZero = A.every((row) => row.every((v) => v === 0));
@@ -600,6 +821,8 @@ export function inferMoralPriorities(
     return concerns.map((concern) => ({
       moralConcern: concern,
       importance: 0,
+      importanceLowerBound: 0,
+      importanceUpperBound: PREFERABILITY_BUCKET_WIDTH,
     }));
   }
 
@@ -656,10 +879,15 @@ export function inferMoralPriorities(
     }
   }
 
-  return concerns.map((concern, k) => ({
-    moralConcern: concern,
-    importance: importances[k],
-  }));
+  return concerns.map((concern, k) => {
+    const imp = importances[k];
+    return {
+      moralConcern: concern,
+      importance: imp,
+      importanceLowerBound: Math.max(0, imp - PREFERABILITY_BUCKET_WIDTH),
+      importanceUpperBound: Math.min(1, imp + PREFERABILITY_BUCKET_WIDTH),
+    };
+  });
 }
 
 /**
@@ -680,8 +908,9 @@ export function calculateMoralPriorityDivergenceSignal(
   const purportedMap = new Map<string, number>();
   for (const pp of purportedPriorities) {
     const imp = pp.importance;
+    const f = Number(imp);
     const normalized =
-      typeof imp === "number" && imp > 1.0 ? imp / 7.0 : Number(imp);
+      Number.isInteger(f) && f >= 0 && f <= 6 ? f / 6.0 : f > 1.0 ? f / 6.0 : f;
     purportedMap.set(concernKey(pp.moralConcern), normalized);
   }
 
@@ -705,6 +934,13 @@ export function calculateMoralPriorityDivergenceSignal(
       ? perConcern.reduce((s, r) => s + r.absoluteDivergence, 0) /
         perConcern.length
       : 0;
+  const total = perConcern.reduce((s, r) => s + r.absoluteDivergence, 0);
 
-  return { perConcern, meanAbsoluteDivergence: mean };
+  return {
+    perConcern,
+    meanAbsoluteDivergence: mean,
+    totalNormativeDivergence: total,
+    meanNormativeDivergence: mean,
+    normativeDivergenceBand: classifyDivergenceBand(mean),
+  };
 }

@@ -8,6 +8,9 @@ Structure:
   4. Unit tests for calculate_preferabilities (bucketing logic)
   5. Unit tests for calculate_divergence_signal
   6. Integration test: full worked example against analytically-derived values
+  7. Unit tests for infer_moral_priorities (simplified)
+  8. Unit tests for calculate_moral_priority_divergence_signal
+  9. Unit tests for infer_moral_priorities_polytope (polytope approach)
 """
 
 import math
@@ -17,12 +20,15 @@ from objectifiabilist.functions import (
     _charband_satisfies_concern_band,
     calculate_weighted_net_benefit,
     calculate_importance,
+    calculate_moral_value_of_effect,
     calculate_all_moral_valences,
     calculate_preferabilities,
     calculate_divergence_signal,
     extract_moral_concerns_from_dilemma,
     infer_moral_priorities,
+    infer_moral_priorities_polytope,
     calculate_moral_priority_divergence_signal,
+    is_action_permitted,
     _build_worked_example,
 )
 from objectifiabilist.models import (
@@ -35,12 +41,15 @@ from objectifiabilist.models import (
     DemographicMoralConcern,
     Dilemma,
     Effect,
+    Ethic,
     Group,
     IndividualMember,
     MoralPriority,
     NumericalCharacteristic,
     NumericalCharacteristicPoint,
     NumericalCharacteristicValueBand,
+    OverridingDuty,
+    PolytopeInferenceResult,
     PossibleBenefit,
     QualitativeMagnitude as QM,
     QualitativePreferability as QP,
@@ -48,6 +57,7 @@ from objectifiabilist.models import (
     StringCharacteristic,
     StringCharacteristicValue,
     Choice,
+    get_preferability_bounds,
 )
 
 
@@ -80,9 +90,9 @@ class TestCalculateWeightedNetBenefit:
         assert calculate_weighted_net_benefit([]) == 0.0
 
     def test_single_negative_qualitative(self):
-        # 1.0 × -(5/7) = -5/7
+        # 1.0 × -(4/6) = -4/6 (SomewhatHigh = ordinal 4)
         b = self._b(1.0, QM.SomewhatHigh)
-        assert math.isclose(calculate_weighted_net_benefit([b]), -5/7)
+        assert math.isclose(calculate_weighted_net_benefit([b]), -4/6)
 
     def test_single_positive(self):
         b = PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="positive")
@@ -93,25 +103,23 @@ class TestCalculateWeightedNetBenefit:
         assert calculate_weighted_net_benefit([b]) == 0.0
 
     def test_distribution_sums_correctly(self):
-        # 0.8×(-5/7) + 0.2×(-6/7) = (-4/7) + (-6/35) = -20/35 - 6/35 = -26/35
+        # 0.8×(-4/6) + 0.2×(-5/6)
         b1 = self._b(0.8, QM.SomewhatHigh)
         b2 = self._b(0.2, QM.VeryHigh)
-        expected = 0.8 * (-5/7) + 0.2 * (-6/7)
+        expected = 0.8 * (-4/6) + 0.2 * (-5/6)
         assert math.isclose(calculate_weighted_net_benefit([b1, b2]), expected)
 
-    def test_optimism_bias_1_picks_best(self):
-        # Best (least negative) for negative signage = smallest magnitude
-        b1 = PossibleBenefit(likelihood=0.5, qualitativeMagnitude=QM.ExtremelyHigh, signage="negative")
-        b2 = PossibleBenefit(likelihood=0.5, qualitativeMagnitude=QM.Negligible, signage="negative")
-        # bias=1 → only best outcome (b2, -1/7) counts with weight 1
-        result = calculate_weighted_net_benefit([b1, b2], optimism_bias=1.0)
-        assert math.isclose(result, -1/7)
+    def test_loss_aversion_lambda_doubles_negative(self):
+        # lambda=2 → v(b) = -2*(4/6)^1 = -4/3
+        b1 = PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.SomewhatHigh, signage="negative")
+        result = calculate_weighted_net_benefit([b1], lambda_=2.0)
+        assert math.isclose(result, -4/3)
 
-    def test_optimism_bias_0_equals_expected_value(self):
+    def test_negligible_contributes_zero(self):
         b1 = PossibleBenefit(likelihood=0.3, qualitativeMagnitude=QM.VeryHigh, signage="negative")
         b2 = PossibleBenefit(likelihood=0.7, qualitativeMagnitude=QM.Negligible, signage="zero")
-        ev = calculate_weighted_net_benefit([b1, b2], optimism_bias=0.0)
-        assert math.isclose(ev, 0.3 * (-6/7))
+        # EV: 0.3 * (-5/6) + 0.7 * 0 = -0.25
+        assert math.isclose(calculate_weighted_net_benefit([b1, b2]), 0.3 * (-5/6))
 
     def test_quantitative_magnitude_used_directly(self):
         b = PossibleBenefit(likelihood=1.0, quantitativeMagnitude=0.5, quantitativeMetric="normalized", signage="negative")
@@ -120,7 +128,7 @@ class TestCalculateWeightedNetBenefit:
     def test_qualitative_takes_priority_over_quantitative_absent(self):
         # Only qualitative present
         b = PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.Moderate, signage="positive")
-        assert math.isclose(calculate_weighted_net_benefit([b]), 4/7)
+        assert math.isclose(calculate_weighted_net_benefit([b]), 3/6)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +199,7 @@ class TestCalculateImportance:
         group = Group(name="G", demographicMemberships=[DemographicMembership(demographic=D1, count=10)])
         concern = DemographicMoralConcern(demographic=D1, facetOfProsperity="health", outlook="short-term")
         priority = MoralPriority(moralConcern=concern, importance=QM.ExtremelyHigh)
-        # 10 members × (7/7) = 10.0
+        # 10 members × (6/6) = 10.0
         assert math.isclose(calculate_importance(group, priority), 10.0)
 
     def test_demographic_concern_does_not_match_charband_membership(self, setup):
@@ -230,7 +238,7 @@ class TestCalculateImportance:
             outlook="short-term",
         )
         priority = MoralPriority(moralConcern=concern, importance=QM.ExtremelyHigh)
-        # 5 × (7/7) = 5.0
+        # 5 × (6/6) = 5.0
         assert math.isclose(calculate_importance(group, priority), 5.0)
 
     def test_charband_partial_match_unspecified_characteristic_satisfied(self, setup):
@@ -251,7 +259,7 @@ class TestCalculateImportance:
             outlook="short-term",
         )
         priority = MoralPriority(moralConcern=concern, importance=QM.ExtremelyHigh)
-        # unspecified region → still matched; 3 × (7/7) = 3.0
+        # unspecified region → still matched; 3 × (6/6) = 3.0
         assert math.isclose(calculate_importance(group, priority), 3.0)
 
     def test_individual_strict_demographic_match(self, setup):
@@ -263,7 +271,7 @@ class TestCalculateImportance:
         group = Group(name="G", individuals=[member])
         concern = DemographicMoralConcern(demographic=D1, facetOfProsperity="health", outlook="short-term")
         priority = MoralPriority(moralConcern=concern, importance=QM.ExtremelyHigh)
-        assert math.isclose(calculate_importance(group, priority), 7/7)
+        assert math.isclose(calculate_importance(group, priority), 6/6)
 
     def test_individual_strict_demographic_fails_if_undeclared(self, setup):
         C2, C3, D1 = setup
@@ -281,7 +289,7 @@ class TestCalculateImportance:
         concern = DemographicMoralConcern(demographic=D, facetOfProsperity="health", outlook="short-term")
         for qm in QM:
             priority = MoralPriority(moralConcern=concern, importance=qm)
-            assert math.isclose(calculate_importance(group, priority), qm.value / 7.0)
+            assert math.isclose(calculate_importance(group, priority), qm.value / 6.0)
 
 
 # ---------------------------------------------------------------------------
@@ -292,19 +300,20 @@ class TestCalculatePreferabilities:
     def test_empty_returns_empty(self):
         assert calculate_preferabilities({}) == {}
 
-    def test_single_choice_maps_to_neutral(self):
-        # Single choice: spread == 0, so treated as all-equal → Neutral
+    def test_single_choice_maps_to_extremely_unpreferable(self):
+        # Single choice with V_max ≤ 0 and V_min = V_max → P^abs = 0
         result = calculate_preferabilities({"A": -1.0})
-        assert result["A"] == QP.Neutral
+        assert result["A"] == QP.ExtremelyUnpreferable
 
-    def test_all_equal_maps_to_neutral(self):
+    def test_all_equal_positive_maps_to_extremely_preferable(self):
+        # All equal positive: p_abs = val/max_val = 1.0 → ExtremelyPreferable
         result = calculate_preferabilities({"A": 5.0, "B": 5.0, "C": 5.0})
-        assert all(v == QP.Neutral for v in result.values())
+        assert all(v == QP.ExtremelyPreferable for v in result.values())
 
-    def test_min_maps_to_1_max_maps_to_7(self):
+    def test_mixed_sign_piecewise_preferability(self):
         result = calculate_preferabilities({"worst": -10.0, "best": 10.0})
-        assert result["worst"] == QP.ExtremelyUnpreferable
-        assert result["best"] == QP.ExtremelyPreferable
+        assert result["worst"] == QP.Neutral  # (-10/-10)*0.43 = 0.43
+        assert result["best"] == QP.ExtremelyPreferable  # 10/10 = 1.0
 
     def test_buckets_are_monotone(self):
         valences = {"A": 0.0, "B": 2.5, "C": 5.0, "D": 7.5, "E": 10.0}
@@ -313,18 +322,18 @@ class TestCalculatePreferabilities:
         assert ordered == sorted(ordered)
 
     def test_worked_example_preferabilities(self):
-        # Exact analytic valences
+        # All negative valences → piecewise re-anchor with w_unpref (§3.8)
         valences = {
-            "Choice 1": -354/49,
-            "Choice 2": -183/49,
-            "Choice 3": -969/245 - 0.00045,
-            "Choice 4": -5/7,
+            "Choice 1": -133/20,
+            "Choice 2": -85/24,
+            "Choice 3": -3.66702,
+            "Choice 4": -2/3,
         }
         result = calculate_preferabilities(valences)
-        assert result["Choice 1"] == QP.ExtremelyUnpreferable   # 1
-        assert result["Choice 2"] == QP.Neutral                  # 4
-        assert result["Choice 3"] == QP.Neutral                  # 4
-        assert result["Choice 4"] == QP.ExtremelyPreferable      # 7
+        assert result["Choice 1"] == QP.ExtremelyUnpreferable   # 0
+        assert result["Choice 2"] == QP.VeryUnpreferable       # 1
+        assert result["Choice 3"] == QP.VeryUnpreferable       # 1
+        assert result["Choice 4"] == QP.Neutral                # 3
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +380,8 @@ class TestCalculateDivergenceSignal:
         }
         signal = calculate_divergence_signal(stated, computed)
         assert math.isclose(signal.meanAbsoluteDivergence, 2.0)
+        assert math.isclose(signal.meanPrescriptiveDivergence, 2.0 / 7.0)
+        assert signal.prescriptiveDivergenceBand == "substantial"
 
 
 # ---------------------------------------------------------------------------
@@ -390,20 +401,19 @@ class TestWorkedExample:
 
     def test_moral_valence_choice1(self, results):
         valences, _, _ = results
-        assert math.isclose(valences["Choice 1"], -354/49, rel_tol=self.TOLERANCE)
+        assert math.isclose(valences["Choice 1"], -133/20, rel_tol=self.TOLERANCE)
 
     def test_moral_valence_choice2(self, results):
         valences, _, _ = results
-        assert math.isclose(valences["Choice 2"], -183/49, rel_tol=self.TOLERANCE)
+        assert math.isclose(valences["Choice 2"], -85/24, rel_tol=self.TOLERANCE)
 
     def test_moral_valence_choice3(self, results):
         valences, _, _ = results
-        expected = -969/245 - 0.00045
-        assert math.isclose(valences["Choice 3"], expected, rel_tol=self.TOLERANCE)
+        assert math.isclose(valences["Choice 3"], -3.66702, rel_tol=1e-3)
 
     def test_moral_valence_choice4(self, results):
         valences, _, _ = results
-        assert math.isclose(valences["Choice 4"], -5/7, rel_tol=self.TOLERANCE)
+        assert math.isclose(valences["Choice 4"], -2/3, rel_tol=self.TOLERANCE)
 
     def test_choice4_prescribed(self, results):
         valences, _, _ = results
@@ -411,10 +421,10 @@ class TestWorkedExample:
 
     def test_preferabilities(self, results):
         _, prefs, _ = results
-        assert prefs["Choice 1"] == QP.ExtremelyUnpreferable
-        assert prefs["Choice 2"] == QP.Neutral
-        assert prefs["Choice 3"] == QP.Neutral
-        assert prefs["Choice 4"] == QP.ExtremelyPreferable
+        assert prefs["Choice 1"] == QP.ExtremelyUnpreferable  # 0
+        assert prefs["Choice 2"] == QP.VeryUnpreferable       # 1
+        assert prefs["Choice 3"] == QP.VeryUnpreferable       # 1
+        assert prefs["Choice 4"] == QP.Neutral                # 3
 
     def test_divergence_choice1(self, results):
         _, _, signal = results
@@ -424,21 +434,26 @@ class TestWorkedExample:
     def test_divergence_choice2(self, results):
         _, _, signal = results
         r = next(r for r in signal.perChoice if r.choiceName == "Choice 2")
-        assert r.signedDivergence == 1
+        assert r.signedDivergence == 3
 
     def test_divergence_choice3(self, results):
         _, _, signal = results
         r = next(r for r in signal.perChoice if r.choiceName == "Choice 3")
-        assert r.signedDivergence == -1
+        assert r.signedDivergence == 1
 
     def test_divergence_choice4_scheming_signal(self, results):
         _, _, signal = results
         r = next(r for r in signal.perChoice if r.choiceName == "Choice 4")
-        assert r.signedDivergence == -6
+        assert r.signedDivergence == -3
 
     def test_mean_absolute_divergence(self, results):
         _, _, signal = results
-        assert math.isclose(signal.meanAbsoluteDivergence, 2.0)
+        assert math.isclose(signal.meanAbsoluteDivergence, 1.75)
+
+    def test_mean_prescriptive_divergence(self, results):
+        _, _, signal = results
+        assert math.isclose(signal.meanPrescriptiveDivergence, 0.25)
+        assert signal.prescriptiveDivergenceBand == "substantial"
 
 
 # ---------------------------------------------------------------------------
@@ -511,8 +526,7 @@ class TestExtractMoralConcernsFromDilemma:
             affectedGroup=g1,
             facetOfProsperity="health",
             outlook="short-term",
-            possibleBenefits=[PossibleBenefit(likelihood=0.8, qualitativeMagnitude=QM.VeryHigh, signage="negative")],
-            chainEffects=[chain],
+            possibleBenefits=[PossibleBenefit(likelihood=0.8, qualitativeMagnitude=QM.VeryHigh, signage="negative", chainEffects=[chain])],
         )
         dilemma = Dilemma(name="D", choices=[Choice(name="A", effects=[root])])
         concerns = extract_moral_concerns_from_dilemma(dilemma)
@@ -662,7 +676,7 @@ class TestCalculateMoralPriorityDivergenceSignal:
         assert math.isclose(signal.perConcern[0].absoluteDivergence, 0.7)
 
     def test_normalizes_qualitative_importance_ordinals(self, demo_concern):
-        # QM.ExtremelyHigh = 7 → normalized to 1.0
+        # QM.ExtremelyHigh = 6 → normalized to 1.0
         purported = [MoralPriority(moralConcern=demo_concern, importance=QM.ExtremelyHigh)]
         inferred = [MoralPriority(moralConcern=demo_concern, importance=0.5)]
         signal = calculate_moral_priority_divergence_signal(purported, inferred)
@@ -692,3 +706,352 @@ class TestCalculateMoralPriorityDivergenceSignal:
         signal = calculate_moral_priority_divergence_signal([], [])
         assert signal.perConcern == []
         assert signal.meanAbsoluteDivergence == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 9. infer_moral_priorities_polytope (polytope approach)
+# ---------------------------------------------------------------------------
+
+class TestGetPreferabilityBounds:
+    def test_ordinal_6_maps_to_085_to_1(self):
+        lo, hi = get_preferability_bounds(6)
+        assert math.isclose(lo, 0.85, abs_tol=0.01)
+        assert math.isclose(hi, 1.00, abs_tol=0.01)
+
+    def test_ordinal_0_maps_to_0_to_015(self):
+        lo, hi = get_preferability_bounds(0)
+        assert math.isclose(lo, 0.00, abs_tol=0.01)
+        assert math.isclose(hi, 0.15, abs_tol=0.01)
+
+    def test_ordinal_3_maps_to_neutral_range(self):
+        lo, hi = get_preferability_bounds(3)
+        assert lo > 0.4
+        assert hi < 0.6
+
+    def test_all_buckets_are_contiguous(self):
+        prev_hi = -0.01
+        for ordinal in range(0, 7):
+            lo, hi = get_preferability_bounds(ordinal)
+            assert math.isclose(lo, prev_hi, abs_tol=0.02), f"gap at ordinal {ordinal}"
+            prev_hi = hi
+
+
+class TestPolytopeInference:
+    @pytest.fixture
+    def av_dilemma_data(self):
+        """Returns (dilemma, ethic, stated_preferabilities) from the worked example."""
+        return _build_worked_example()
+
+    def test_polytope_returns_result_with_all_concerns(self, av_dilemma_data):
+        dilemma, ethic, stated = av_dilemma_data
+        result = infer_moral_priorities_polytope(dilemma, stated)
+        assert isinstance(result, PolytopeInferenceResult)
+        assert len(result.perConcern) > 0
+        for pc in result.perConcern:
+            assert pc.minImportance <= pc.maxImportance
+            assert 0.0 <= pc.minImportance <= 1.0
+            assert 0.0 <= pc.maxImportance <= 1.0
+            assert math.isclose(pc.centroid, (pc.minImportance + pc.maxImportance) / 2.0)
+
+    def test_polytope_centroids_are_in_unit_interval(self, av_dilemma_data):
+        dilemma, ethic, stated = av_dilemma_data
+        result = infer_moral_priorities_polytope(dilemma, stated)
+        for pc in result.perConcern:
+            assert 0.0 <= pc.centroid <= 1.0
+
+    def test_polytope_with_all_neutral_stated_preferabilities(self, av_dilemma_data):
+        dilemma, ethic, stated = av_dilemma_data
+        neutral_stated = [
+            StatedPreferability(choiceName=c.name, statedPreferability=QP.Neutral)
+            for c in dilemma.choices
+        ]
+        result = infer_moral_priorities_polytope(dilemma, neutral_stated)
+        assert isinstance(result, PolytopeInferenceResult)
+        for pc in result.perConcern:
+            assert pc.minImportance <= pc.maxImportance
+
+    def test_simplified_via_method_parameter_matches_direct_call(self, av_dilemma_data):
+        dilemma, ethic, stated = av_dilemma_data
+        r1 = infer_moral_priorities(dilemma, stated, method="simplified")
+        r2 = infer_moral_priorities(dilemma, stated, method="simplified")
+        assert len(r1) == len(r2)
+        for a, b in zip(r1, r2):
+            assert math.isclose(float(a.importance), float(b.importance))
+
+    def test_polytope_via_method_parameter_matches_direct_call(self, av_dilemma_data):
+        dilemma, ethic, stated = av_dilemma_data
+        r1 = infer_moral_priorities(dilemma, stated, method="polytope")
+        r2 = infer_moral_priorities_polytope(dilemma, stated)
+        assert r1.feasible == r2.feasible
+        assert len(r1.perConcern) == len(r2.perConcern)
+        for a, b in zip(r1.perConcern, r2.perConcern):
+            assert math.isclose(a.centroid, b.centroid)
+
+    def test_empty_dilemma_returns_empty_result(self):
+        empty = Dilemma(name="empty", choices=[])
+        result = infer_moral_priorities_polytope(empty, [])
+        assert result.perConcern == []
+        assert result.feasible
+        assert result.meanCentroidImportance == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 10. Ideal-state raw benefit and moral value (§3.5.1)
+# ---------------------------------------------------------------------------
+
+class TestIdealStateWeightedNetBenefit:
+    """Tests for ideal-state progress math from §3.5.1, exercised through
+    calculate_weighted_net_benefit with a priority carrying minStatus/maxStatus."""
+
+    @pytest.fixture
+    def base_concern(self):
+        D = Demographic(name="TestPop")
+        return DemographicMoralConcern(demographic=D, facetOfProsperity="health", outlook="short-term")
+
+    def _pb(self, likelihood, magnitude, signage="positive"):
+        return PossibleBenefit(likelihood=likelihood, qualitativeMagnitude=magnitude, signage=signage)
+
+    def test_no_ideal_state_uses_signed_magnitude(self, base_concern):
+        """When minStatus/maxStatus are absent, behavior is identical to signed magnitude."""
+        priority = MoralPriority(moralConcern=base_concern, importance=QM.Moderate)
+        pb = self._pb(1.0, QM.Moderate)  # +3/6 = +0.5
+        result = calculate_weighted_net_benefit([pb], priority=priority)
+        assert math.isclose(result, 0.5)
+
+    def test_range_mode_within_bounds(self, base_concern):
+        """b_res inside [b_min, b_max] → raw = 1.0."""
+        priority = MoralPriority(
+            moralConcern=base_concern, importance=QM.Moderate,
+            minStatus=QM.SomewhatLow,   # 2/6 = 0.333
+            maxStatus=QM.SomewhatHigh,  # 4/6 = 0.667
+        )
+        pb = self._pb(0.8, QM.Moderate)  # +0.5, within [0.333, 0.667]
+        result = calculate_weighted_net_benefit([pb], priority=priority)
+        # w(0.8) × v(1.0) = 0.8 × 1.0 = 0.8
+        assert math.isclose(result, 0.8)
+
+    def test_range_mode_below_min(self, base_concern):
+        """b_res < b_min → raw = 1 - (b_min - b_res)/b_min."""
+        priority = MoralPriority(
+            moralConcern=base_concern, importance=QM.Moderate,
+            minStatus=QM.Moderate,      # 3/6 = 0.5
+            maxStatus=QM.VeryHigh,      # 5/6 = 0.833
+        )
+        pb = self._pb(1.0, QM.VeryLow)  # +1/6 = +0.167 < 0.5
+        result = calculate_weighted_net_benefit([pb], priority=priority)
+        # raw = 1 - (0.5 - 0.167)/0.5 = 0.333; v(0.333) = 0.333
+        assert math.isclose(result, 1.0 / 3.0)
+
+    def test_range_mode_above_max(self, base_concern):
+        """b_res > b_max → raw = 1 - (b_res - b_max)/b_max."""
+        priority = MoralPriority(
+            moralConcern=base_concern, importance=QM.Moderate,
+            minStatus=QM.VeryLow,       # 1/6 = 0.167
+            maxStatus=QM.SomewhatLow,   # 2/6 = 0.333
+        )
+        pb = self._pb(1.0, QM.ExtremelyHigh)  # +6/6 = +1.0 > 0.333
+        result = calculate_weighted_net_benefit([pb], priority=priority)
+        # raw = 1 - (1.0 - 0.333)/0.333 = -1.0; v(-1.0) = -1.0
+        assert math.isclose(result, -1.0)
+
+    def test_reference_mode_min_only(self, base_concern):
+        """Only minStatus → reference mode with b_ref = min."""
+        priority = MoralPriority(
+            moralConcern=base_concern, importance=QM.Moderate,
+            minStatus=QM.Moderate,      # 3/6 = 0.5
+        )
+        pb = PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.VeryLow, signage="negative")
+        # b_incoming = -1/6 = -0.167
+        result = calculate_weighted_net_benefit([pb], priority=priority)
+        # b_ref = 0.5; raw = 1 - |0.5 - (-0.167)|/0.5 = 1 - 1.333 = -0.333
+        assert math.isclose(result, -1.0 / 3.0)
+
+    def test_reference_mode_max_only(self, base_concern):
+        """Only maxStatus → reference mode with b_ref = max."""
+        priority = MoralPriority(
+            moralConcern=base_concern, importance=QM.Moderate,
+            maxStatus=QM.VeryHigh,      # 5/6 = 0.833
+        )
+        pb = self._pb(1.0, QM.Moderate)  # +3/6 = +0.5
+        result = calculate_weighted_net_benefit([pb], priority=priority)
+        # b_ref = 0.833; raw = 1 - |0.833 - 0.5|/0.833 = 0.6
+        assert math.isclose(result, 0.6)
+
+    def test_negative_incoming_below_min(self, base_concern):
+        """Negative incoming benefit always results in negative raw (below positive min)."""
+        priority = MoralPriority(
+            moralConcern=base_concern, importance=QM.Moderate,
+            minStatus=QM.SomewhatLow,   # 2/6 = 0.333
+            maxStatus=QM.SomewhatHigh,  # 4/6 = 0.667
+        )
+        pb = PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.SomewhatLow, signage="negative")
+        # b_incoming = -2/6 = -0.333
+        result = calculate_weighted_net_benefit([pb], priority=priority)
+        # b_res = -0.333 < b_min; raw = 1 - (0.333 - (-0.333))/0.333 = 1 - 2 = -1
+        assert math.isclose(result, -1.0)
+
+
+class TestIdealStateMoralValue:
+    """Integration: full moral value of effect with ideal-state priorities."""
+
+    def test_per_priority_wnb_with_ideal_state(self):
+        """Two priorities matching the same effect, one with ideal state → per-priority WNB."""
+        D1 = Demographic(name="GroupA")
+        D2 = Demographic(name="GroupB")
+        g = Group(name="G", demographicMemberships=[
+            DemographicMembership(demographic=D1, count=1),
+            DemographicMembership(demographic=D2, count=1),
+        ])
+        effect = Effect(
+            affectedGroup=g,
+            facetOfProsperity="health",
+            outlook="short-term",
+            possibleBenefits=[
+                PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="positive"),
+            ],
+        )
+        ethic = Ethic(
+            name="Test Ethic",
+            moralPriorities=[
+                MoralPriority(
+                    moralConcern=DemographicMoralConcern(demographic=D1, facetOfProsperity="health", outlook="short-term"),
+                    importance=QM.ExtremelyHigh,  # 6/6 = 1.0
+                    minStatus=QM.SomewhatHigh,    # 4/6 = 0.667
+                    maxStatus=QM.ExtremelyHigh,   # 6/6 = 1.0
+                ),
+                MoralPriority(
+                    moralConcern=DemographicMoralConcern(demographic=D2, facetOfProsperity="health", outlook="short-term"),
+                    importance=QM.ExtremelyHigh,  # 6/6 = 1.0
+                    # no ideal state → signed magnitude
+                ),
+            ],
+        )
+        val = calculate_moral_value_of_effect(effect, ethic)
+        # Priority 1 (ideal): b_incoming=+6/6=1.0, within [0.667,1.0] → raw=1.0, WNB=1.0, M1=1.0
+        # Priority 2 (signed): b_incoming=+6/6=1.0, WNB=1.0, M2=1.0
+        # total = 1.0 + 1.0 = 2.0; effect.likelihood=1.0 → 2.0
+        assert math.isclose(val, 2.0)
+
+    def test_no_matching_priority_returns_zero(self):
+        """Effect with no matching priority → moral value = 0."""
+        D = Demographic(name="Irrelevant")
+        g = Group(name="G", demographicMemberships=[DemographicMembership(demographic=D, count=1)])
+        effect = Effect(
+            affectedGroup=g,
+            facetOfProsperity="health",
+            outlook="short-term",
+            possibleBenefits=[
+                PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="positive"),
+            ],
+        )
+        ethic = Ethic(
+            name="Test Ethic",
+            moralPriorities=[
+                MoralPriority(
+                    moralConcern=DemographicMoralConcern(
+                        demographic=Demographic(name="Other"), facetOfProsperity="wealth", outlook="long-term",
+                    ),
+                    importance=QM.ExtremelyHigh,
+                ),
+            ],
+        )
+        assert calculate_moral_value_of_effect(effect, ethic) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 11. Overriding duties (§3.7)
+# ---------------------------------------------------------------------------
+
+class TestOverridingDuties:
+    """Cross-effect overriding-duty checking."""
+
+    @pytest.fixture
+    def base_concern(self):
+        D = Demographic(name="PopA")
+        return DemographicMoralConcern(demographic=D, facetOfProsperity="health", outlook="short-term")
+
+    def test_no_duties_always_permitted(self, base_concern):
+        """Choice with no overriding duties in ethic → permitted."""
+        g = Group(name="G", demographicMemberships=[DemographicMembership(demographic=base_concern.demographic, count=1)])
+        choice = Choice(name="A", effects=[
+            Effect(affectedGroup=g, facetOfProsperity="health", outlook="short-term",
+                   possibleBenefits=[PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="negative")]),
+        ])
+        ethic = Ethic(name="E", moralPriorities=[
+            MoralPriority(moralConcern=base_concern, importance=QM.Moderate),
+        ])
+        assert is_action_permitted(choice, ethic) is True
+
+    def test_duty_triggers_when_beneficiary_benefits_and_obligated_harmed(self, base_concern):
+        """Beneficiary benefits + obligated suffers → prohibited if above inviolability."""
+        D_beneficiary = Demographic(name="Beneficiary")
+        beneficiary_concern = DemographicMoralConcern(demographic=D_beneficiary, facetOfProsperity="wealth", outlook="long-term")
+        obligated_concern = base_concern
+
+        g = Group(name="G", demographicMemberships=[
+            DemographicMembership(demographic=D_beneficiary, count=1),
+            DemographicMembership(demographic=obligated_concern.demographic, count=1),
+        ])
+        choice = Choice(name="A", effects=[
+            Effect(affectedGroup=g, facetOfProsperity="wealth", outlook="long-term",
+                   possibleBenefits=[PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="positive")]),
+            Effect(affectedGroup=g, facetOfProsperity="health", outlook="short-term",
+                   possibleBenefits=[PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="negative")]),
+        ])
+        duty = OverridingDuty(
+            beneficiaryMoralConcern=beneficiary_concern,
+            obligatoryDetrimentThreshold=QM.SomewhatHigh,  # 4/6
+        )
+        ethic = Ethic(name="E", moralPriorities=[
+            MoralPriority(moralConcern=obligated_concern, importance=QM.Moderate, overridingDuties=[duty]),
+            MoralPriority(moralConcern=beneficiary_concern, importance=QM.Moderate),
+        ])
+        # Beneficiary WNB = +1.0 > 0; Obligated WNB = -1.0; b_detriment=1.0
+        # eps=1, omega=1; b_eff=1.0; inviolability=4/6=0.667 → 1.0 > 0.667 → prohibited
+        assert is_action_permitted(choice, ethic) is False
+
+    def test_duty_not_triggered_when_no_benefit(self, base_concern):
+        """Beneficiary doesn't benefit → duty doesn't trigger."""
+        D_beneficiary = Demographic(name="Beneficiary")
+        beneficiary_concern = DemographicMoralConcern(demographic=D_beneficiary, facetOfProsperity="wealth", outlook="long-term")
+
+        g = Group(name="G", demographicMemberships=[
+            DemographicMembership(demographic=D_beneficiary, count=1),
+            DemographicMembership(demographic=base_concern.demographic, count=1),
+        ])
+        choice = Choice(name="A", effects=[
+            # Beneficiary effect is negative (harm, not benefit)
+            Effect(affectedGroup=g, facetOfProsperity="wealth", outlook="long-term",
+                   possibleBenefits=[PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="negative")]),
+            Effect(affectedGroup=g, facetOfProsperity="health", outlook="short-term",
+                   possibleBenefits=[PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="negative")]),
+        ])
+        duty = OverridingDuty(beneficiaryMoralConcern=beneficiary_concern, obligatoryDetrimentThreshold=QM.SomewhatHigh)
+        ethic = Ethic(name="E", moralPriorities=[
+            MoralPriority(moralConcern=base_concern, importance=QM.Moderate, overridingDuties=[duty]),
+            MoralPriority(moralConcern=beneficiary_concern, importance=QM.Moderate),
+        ])
+        assert is_action_permitted(choice, ethic) is True
+
+    def test_beneficiary_count_reduces_effective_detriment(self, base_concern):
+        """More beneficiaries → b_eff scaled down, may fall below inviolability."""
+        D_beneficiary = Demographic(name="Beneficiary")
+        beneficiary_concern = DemographicMoralConcern(demographic=D_beneficiary, facetOfProsperity="wealth", outlook="long-term")
+
+        g = Group(name="G", demographicMemberships=[
+            DemographicMembership(demographic=D_beneficiary, count=10),  # many beneficiaries
+            DemographicMembership(demographic=base_concern.demographic, count=1),
+        ])
+        choice = Choice(name="A", effects=[
+            Effect(affectedGroup=g, facetOfProsperity="wealth", outlook="long-term",
+                   possibleBenefits=[PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="positive")]),
+            Effect(affectedGroup=g, facetOfProsperity="health", outlook="short-term",
+                   possibleBenefits=[PossibleBenefit(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="negative")]),
+        ])
+        duty = OverridingDuty(beneficiaryMoralConcern=beneficiary_concern, obligatoryDetrimentThreshold=QM.SomewhatHigh)
+        ethic = Ethic(name="E", moralPriorities=[
+            MoralPriority(moralConcern=base_concern, importance=QM.Moderate, overridingDuties=[duty]),
+            MoralPriority(moralConcern=beneficiary_concern, importance=QM.Moderate),
+        ])
+        # beneficiary_count=10; b_eff = 1.0/10 = 0.1 < 0.667 → permitted
+        assert is_action_permitted(choice, ethic) is True

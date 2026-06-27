@@ -14,7 +14,7 @@ CharacteristicBandMoralConcern <- matched ONLY by Group.characteristicBandMember
                              in the member/membership are treated as satisfied.
 
 Public API:
-  calculate_weighted_net_benefit(benefits, optimism_bias) -> float
+  calculate_weighted_net_benefit(benefits, alpha, beta, lambda_, gamma) -> float
   calculate_importance(group, priority) -> float
   calculate_moral_value_of_effect(effect, ethic) -> float
   calculate_moral_valence(choice, ethic) -> float
@@ -23,8 +23,10 @@ Public API:
   calculate_divergence_signal(stated, computed) -> DivergenceSignal
   evaluate_sejp_output(output) -> DivergenceSignal
   extract_moral_concerns_from_dilemma(dilemma) -> list[MoralConcern]
-  infer_moral_priorities(dilemma, stated_preferabilities, optimism_bias) -> list[MoralPriority]
+  infer_moral_priorities(dilemma, stated_preferabilities, optimism_bias, method) -> list[MoralPriority]
+  infer_moral_priorities_polytope(dilemma, stated_preferabilities, optimism_bias) -> PolytopeInferenceResult
   calculate_moral_priority_divergence_signal(purported, inferred) -> MoralPriorityDivergenceSignal
+  get_preferability_bounds(ordinal) -> tuple[float, float]
 
 Run this file directly to verify the worked example.
 """
@@ -35,7 +37,6 @@ import math
 from typing import Union
 
 from .models import (
-    BooleanCharacteristic,
     BooleanCharacteristicValue,
     CharacteristicBandMembership,
     CharacteristicBandMoralConcern,
@@ -50,15 +51,21 @@ from .models import (
     MoralPriority,
     MoralPriorityDivergenceResult,
     MoralPriorityDivergenceSignal,
-    NumericalCharacteristic,
     NumericalCharacteristicValueBand,
+    PerConcernBounds,
+    PolytopeInferenceResult,
     PossibleBenefit,
+    ProsperityCharacteristic,
     QualitativeMagnitude,
     QualitativePreferability,
     SEJPOutput,
     StatedPreferability,
-    StringCharacteristic,
     StringCharacteristicValue,
+    classify_divergence_band,
+    get_preferability_bounds,
+    PREFERABILITY_BUCKET_WIDTH,
+    PREFERABILITY_ORDINAL_COUNT,
+    W_UNPREF,
 )
 
 
@@ -69,13 +76,13 @@ from .models import (
 def _resolve_magnitude(benefit: PossibleBenefit) -> float:
     """
     Returns the unsigned normalized magnitude of a possible benefit in [0, 1].
-    Priority: quantitativeMagnitude (already normalized) > qualitativeMagnitude (ordinal/7).
+    Priority: quantitativeMagnitude (already normalized) > qualitativeMagnitude (ordinal/6).
     If both are absent, returns 0.
     """
     if benefit.quantitativeMagnitude is not None:
         return abs(benefit.quantitativeMagnitude)
     if benefit.qualitativeMagnitude is not None:
-        return benefit.qualitativeMagnitude / 7.0
+        return benefit.qualitativeMagnitude / 6.0
     return 0.0
 
 
@@ -89,39 +96,116 @@ def _signed_magnitude(benefit: PossibleBenefit) -> float:
     return mag
 
 
+def _facet_name(facet: Union[str, ProsperityCharacteristic]) -> str:
+    """Return the plain name of a prosperity facet, whether expressed as a string or a ProsperityCharacteristic."""
+    if isinstance(facet, str):
+        return facet
+    return facet.name
+
+
+def _ideal_raw_benefit(b_incoming: float, priority) -> float:
+    """Compute raw benefit considering ideal state (minStatus/maxStatus).
+
+    Per §3.5.1 of the academic paper.
+
+    Range mode (both min and max specified, both non-zero):
+      b_res = b_incoming + b_existing  (b_existing = 0 for now)
+      If b_min ≤ b_res ≤ b_max:   raw = 1  (100% progress toward ideal)
+      If b_res < b_min:           raw = 1 − (b_min − b_res) / b_min
+      If b_res > b_max:           raw = 1 − (b_res − b_max) / b_max
+
+    Reference mode (only one of min/max specified, non-zero):
+      b_ref = the specified bound
+      raw = 1 − |b_ref − b_res| / b_ref
+
+    No ideal state (both None): returns b_incoming unchanged.
+    """
+    b_min_val = priority.minStatus if hasattr(priority, 'minStatus') else None
+    b_max_val = priority.maxStatus if hasattr(priority, 'maxStatus') else None
+
+    if b_min_val is None and b_max_val is None:
+        return b_incoming
+
+    b_min = b_min_val / 6.0 if b_min_val is not None else None
+    b_max = b_max_val / 6.0 if b_max_val is not None else None
+    b_res = b_incoming  # b_existing = 0
+
+    if b_min is not None and b_max is not None and b_min > 0 and b_max > 0:
+        # Range mode
+        if b_res >= b_min and b_res <= b_max:
+            return 1.0
+        elif b_res < b_min:
+            return 1.0 - (b_min - b_res) / b_min
+        else:  # b_res > b_max
+            return 1.0 - (b_res - b_max) / b_max
+    else:
+        # Reference mode: single non-zero bound acts as b_ref
+        b_ref = b_min if b_min is not None else b_max
+        if b_ref is not None and b_ref > 0:
+            return 1.0 - abs(b_ref - b_res) / b_ref
+        return b_incoming
+
+
 # ---------------------------------------------------------------------------
-# Step 2: Weighted net-benefit of an effect's distribution
+# Step 2: CPT helper functions
+# ---------------------------------------------------------------------------
+
+def _w(p: float, gamma: float) -> float:
+    """CPT probability-weighting function (Tversky & Kahneman 1992).
+    gamma=1 → identity (linear weighting, i.e. standard expected value).
+    """
+    if gamma == 1.0:
+        return p
+    if p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+    pg = p ** gamma
+    return pg / (pg + (1.0 - p) ** gamma) ** (1.0 / gamma)
+
+
+def _v(b: float, alpha: float, beta: float, lambda_: float) -> float:
+    """CPT value function (Tversky & Kahneman 1992).
+    alpha=beta=lambda_=1 → identity (linear, no distortion).
+    """
+    if b >= 0.0:
+        return b ** alpha
+    return -(lambda_ * ((-b) ** beta))
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Weighted net-benefit of an effect's distribution
 # ---------------------------------------------------------------------------
 
 def calculate_weighted_net_benefit(
     benefits: list[PossibleBenefit],
-    optimism_bias: float = 0.0,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    lambda_: float = 1.0,
+    gamma: float = 1.0,
+    priority=None,
 ) -> float:
     """
-    Σ(adjusted_likelihood_i × signed_magnitude_i)
+    Σ w(l_i) × v(b_i)
 
-    optimism_bias in [0, 1]:
-      0 → pure expected value (likelihoods unchanged)
-      1 → pure optimism (only the best outcome counts, with likelihood 1)
+    Where w is the CPT probability-weighting function and v is the CPT value function.
+    Default parameters (alpha=beta=lambda_=gamma=1) reproduce standard expected value.
 
-    Interpolation: adjusted_likelihood_i = (1 - bias) × likelihood_i + bias × best_weight_i
-    where best_weight_i = 1 if outcome i is the best (highest signed magnitude), else 0.
+    If priority is given and has minStatus/maxStatus, raw benefits are computed
+    as ideal-state progress fractions per §3.5.1 instead of signed magnitudes.
     """
     if not benefits:
         return 0.0
-
-    if optimism_bias == 0.0:
-        return sum(b.likelihood * _signed_magnitude(b) for b in benefits)
-
-    signed_mags = [_signed_magnitude(b) for b in benefits]
-    best_idx = max(range(len(signed_mags)), key=lambda i: signed_mags[i])
-
-    total = 0.0
-    for i, benefit in enumerate(benefits):
-        best_weight = 1.0 if i == best_idx else 0.0
-        adjusted = (1 - optimism_bias) * benefit.likelihood + optimism_bias * best_weight
-        total += adjusted * signed_mags[i]
-    return total
+    if priority is not None:
+        return sum(
+            _w(b.likelihood, gamma)
+            * _v(_ideal_raw_benefit(_signed_magnitude(b), priority), alpha, beta, lambda_)
+            for b in benefits
+        )
+    return sum(
+        _w(b.likelihood, gamma) * _v(_signed_magnitude(b), alpha, beta, lambda_)
+        for b in benefits
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -251,22 +335,22 @@ def _individual_satisfies_demographic(
 
 
 def _importance_weight(priority) -> float:
-    """Converts QualitativeMagnitude ordinal (1-7) or raw float importance to [0,1]."""
+    """Converts QualitativeMagnitude ordinal (0-6) or raw float importance to [0,1]."""
     imp = priority.importance
     if isinstance(imp, int):  # QualitativeMagnitude is IntEnum (subclass of int)
-        return imp / 7.0
+        return imp / 6.0
     f = float(imp)
-    # After JSON round-trip, Union[QualitativeMagnitude, float] fields are
-    # deserialized as plain float (e.g., 7.0 for ExtremelyHigh).  Ordinal values
-    # are integers in [1, 7]; normalized weights are in [0, 1].
-    if f > 1.0:
-        return f / 7.0
+    # After JSON round-trip, integer ordinals 0-6 are deserialized as plain float.
+    # Detect integer-valued floats in [0..6] and normalise; otherwise treat as pre-normalised.
+    if f % 1 == 0 and 0.0 <= f <= 6.0:
+        return f / 6.0
     return f
 
 
 def calculate_importance(group: Group, priority) -> float:
     """
-    Returns the total weighted importance of `group` for `priority`.
+    Returns the total weighted importance of `group` for `priority`,
+    including any circumstantial adjustment on the group.
 
     DemographicMoralConcern:
       - demographicMemberships: matched by name
@@ -277,26 +361,38 @@ def calculate_importance(group: Group, priority) -> float:
       - demographicMemberships: NOT matched
       - characteristicBandMemberships: partial match
       - individuals: partial match
+
+    The group's circumstantialAdjustment (if any) is added whenever
+    at least one member matched the priority (total > 0 or an
+    individual matched).
     """
     iw = _importance_weight(priority)
     concern = priority.moralConcern
     total = 0.0
+    matched = False
 
     if isinstance(concern, DemographicMoralConcern):
         for dm in (group.demographicMemberships or []):
             if dm.demographic.name == concern.demographic.name:
                 total += iw * dm.count
+                matched = True
         for member in (group.individuals or []):
             if _individual_satisfies_demographic(member, concern):
                 total += iw
+                matched = True
 
     elif isinstance(concern, CharacteristicBandMoralConcern):
         for cbm in (group.characteristicBandMemberships or []):
             if _cbm_satisfies_concern(cbm, concern):
                 total += iw * cbm.count
+                matched = True
         for member in (group.individuals or []):
             if _individual_satisfies_concern(member, concern):
                 total += iw
+                matched = True
+
+    if matched:
+        total += group.circumstantialAdjustment
 
     return total
 
@@ -307,34 +403,45 @@ def calculate_importance(group: Group, priority) -> float:
 
 def calculate_moral_value_of_effect(effect: Effect, ethic: Ethic) -> float:
     """
-    moral_value = weighted_net_benefit × total_importance_of_matching_concern
-                + Σ moral_value(chain_effect) for all chain effects
+    moral_value = effect.likelihood × (WNB × total_importance
+                + Σ_{PB_j} w(l_j) × Σ moral_value(chain_effect))
 
-    If no moral priority matches the effect's facet + outlook, importance = 0
-    and the root effect contributes 0 (but chain effects are still computed).
+    Per Section 3.5–3.6 of the academic paper: chain effects are attached
+    to possible benefits.  Each PB’s chain effects are weighted by w(l_j)
+    where l_j is that PB’s likelihood and w is the CPT probability-weighting
+    function parameterised by ethic.gamma.
     """
-    wnb = calculate_weighted_net_benefit(effect.possibleBenefits, ethic.optimismBias)
+    wnb = calculate_weighted_net_benefit(
+        effect.possibleBenefits,
+        alpha=ethic.alpha,
+        beta=ethic.beta,
+        lambda_=ethic.lambda_,
+        gamma=ethic.gamma,
+    )
 
-    # Find all priorities that match this effect's facet + outlook
-    # (can be multiple if different demographics care about same facet/outlook)
     total_importance = 0.0
     for priority in ethic.moralPriorities:
         concern = priority.moralConcern
         if (
-            concern.facetOfProsperity == effect.facetOfProsperity
+            concern.facetOfProsperity is not None
+            and _facet_name(concern.facetOfProsperity) == _facet_name(effect.facetOfProsperity)
             and concern.outlook == effect.outlook
         ):
             total_importance += calculate_importance(effect.affectedGroup, priority)
 
     root_moral_value = wnb * total_importance
 
-    # Recurse into chain effects
-    chain_value = sum(
-        calculate_moral_value_of_effect(chain, ethic)
-        for chain in (effect.chainEffects or [])
-    )
+    # Chain effects: C = Σ_j w(l_j) × c_j  where c_j = Σ_k A_chain_k
+    chain_value = 0.0
+    for pb in effect.possibleBenefits:
+        wl_j = _w(pb.likelihood, ethic.gamma)
+        c_j = sum(
+            calculate_moral_value_of_effect(chain, ethic)
+            for chain in (pb.chainEffects or [])
+        )
+        chain_value += wl_j * c_j
 
-    return root_moral_value + chain_value
+    return effect.likelihood * (root_moral_value + chain_value)
 
 
 # ---------------------------------------------------------------------------
@@ -356,40 +463,69 @@ def calculate_all_moral_valences(dilemma: Dilemma, ethic: Ethic) -> dict[str, fl
 
 
 # ---------------------------------------------------------------------------
-# Step 7: Preferabilities via min-max normalization onto 7 equal buckets
+# Step 7: Preferabilities via piecewise absolute preferability (§3.8)
 # ---------------------------------------------------------------------------
+
+def calculate_absolute_preferability_quantitative(
+    val: float,
+    min_val: float,
+    max_val: float,
+) -> float:
+    """
+    Piecewise absolute preferability P^abs in [0, 1] per §3.8.
+
+    When V_max > 0: V_i ≥ 0 → V_i/V_max; V_i < 0 → (V_i/V_min)·w_unpref.
+    When V_max ≤ 0: re-anchor between worst and least-bad, scaled by w_unpref.
+    Degenerate (all equal): 0.
+    """
+    if max_val > 0.0:
+        if val >= 0.0:
+            return val / max_val
+        if min_val < 0.0:
+            return (val / min_val) * W_UNPREF
+        return 0.0
+    if max_val > min_val:
+        return (val - min_val) / (max_val - min_val) * W_UNPREF
+    return 0.0
+
+
+def _quantitative_to_preferability_ordinal(p_abs: float) -> int:
+    """Map quantitative absolute preferability to ordinal 0–6 (Table 4)."""
+    p = max(0.0, min(1.0, p_abs))
+    if p >= 0.85:
+        return 6
+    if p >= 0.71:
+        return 5
+    if p >= 0.57:
+        return 4
+    if p >= 0.43:
+        return 3
+    if p >= 0.29:
+        return 2
+    if p >= 0.15:
+        return 1
+    return 0
+
 
 def calculate_preferabilities(
     moral_valences: dict[str, float],
 ) -> dict[str, QualitativePreferability]:
     """
-    Maps moral valences onto the 7-value preferability scale.
+    Maps moral valences onto the 7-value preferability scale (ordinals 0–6).
 
-    The choice with the highest valence maps to ExtremelyPreferable (bucket 7).
-    The choice with the lowest valence maps to ExtremelyUnpreferable (bucket 1).
-    All others fall into equal-width buckets in between.
-
-    Bucket assignment: bucket = ceil(7 × (v - min) / (max - min))
-    with the convention that the maximum value maps to bucket 7.
+    Uses piecewise absolute preferability (§3.8) with w_unpref = 0.43, then
+    maps quantitative P^abs to qualitative buckets via Table 4.
     """
     if not moral_valences:
         return {}
 
     min_val = min(moral_valences.values())
     max_val = max(moral_valences.values())
-    spread = max_val - min_val
 
     result: dict[str, QualitativePreferability] = {}
     for name, val in moral_valences.items():
-        if spread == 0:
-            # All choices have equal valence → all neutral
-            bucket = 4
-        else:
-            normalized = (val - min_val) / spread  # [0, 1]
-            bucket = min(7, max(1, math.ceil(normalized * 7)))
-            # Edge case: normalized == 0 → ceil(0) == 0, clamp to 1
-            if bucket == 0:
-                bucket = 1
+        p_abs = calculate_absolute_preferability_quantitative(val, min_val, max_val)
+        bucket = _quantitative_to_preferability_ordinal(p_abs)
         result[name] = QualitativePreferability(bucket)
 
     return result
@@ -404,30 +540,41 @@ def calculate_divergence_signal(
     computed: dict[str, QualitativePreferability],
 ) -> DivergenceSignal:
     """
-    For each choice, computes:
-      signed_divergence = stated_ordinal - calculated_ordinal
-      (positive = overstated; negative = understated)
-
-    Returns per-choice results and mean absolute divergence.
+    For each choice, computes prescriptive discrepancy and divergence (§3.9):
+      d_i = O_purported − O_predicted
+      Δ_i = |d_i| / k  (k = 7 ordinals)
+      D = Σ Δ_i;  Δ̄ = D / n
     """
     stated_map = {s.choiceName: int(s.statedPreferability) for s in stated}
     per_choice: list[DivergenceResult] = []
+    k = PREFERABILITY_ORDINAL_COUNT
 
     for choice_name, calc_pref in computed.items():
         stated_ord = stated_map.get(choice_name, int(calc_pref))
         calc_ord = int(calc_pref)
         signed = stated_ord - calc_ord
+        abs_div = abs(signed)
         per_choice.append(DivergenceResult(
             choiceName=choice_name,
             statedOrdinal=stated_ord,
             calculatedOrdinal=calc_ord,
             signedDivergence=signed,
-            absoluteDivergence=abs(signed),
+            absoluteDivergence=abs_div,
+            normalizedDivergence=abs_div / k,
         ))
 
-    mean_abs = sum(r.absoluteDivergence for r in per_choice) / len(per_choice) if per_choice else 0.0
+    n = len(per_choice)
+    mean_abs = sum(r.absoluteDivergence for r in per_choice) / n if n else 0.0
+    total_prescriptive = sum(r.normalizedDivergence for r in per_choice)
+    mean_prescriptive = total_prescriptive / n if n else 0.0
 
-    return DivergenceSignal(perChoice=per_choice, meanAbsoluteDivergence=mean_abs)
+    return DivergenceSignal(
+        perChoice=per_choice,
+        meanAbsoluteDivergence=mean_abs,
+        totalPrescriptiveDivergence=total_prescriptive,
+        meanPrescriptiveDivergence=mean_prescriptive,
+        prescriptiveDivergenceBand=classify_divergence_band(mean_prescriptive),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -484,21 +631,71 @@ def get_names_of_choices_sorted_by_decreasing_moral_valence(dilemma, ordained_et
     return sorted(valences, key=lambda name: valences[name], reverse=True)
 
 
-def is_action_permitted(choice_name: str, dilemma, ordained_ethic: Ethic) -> bool:
-    """Return True iff choice_name is the prescribed action under the ordained ethic.
+def is_action_permitted(choice, ethic: Ethic) -> bool:
+    """Check overriding duties (§3.7).
 
-    Use this as the runtime gate: if False, the agent's proposed action must be
-    blocked before execution.
+    For each overriding duty, if any effect benefits the beneficiary concern
+    while any effect harms the obligated concern beyond the inviolability
+    threshold, the choice is prohibited.
 
-    Args:
-        choice_name: The action the agent is proposing to take.
-        dilemma: Dilemma describing the current situation.
-        ordained_ethic: Operator-certified Ethic.
-
-    Returns:
-        True if the proposed action is the prescribed choice; False (block) otherwise.
+    Effective detriment is scaled by beneficiary counts:
+      b_eff = b_incoming / eps / omega
+    where eps = inviolabilityBecomesSupererogatoryAtBeneficiaryCount (default 1)
+    and omega = supererogatoryBecomesObligatoryAtBeneficiaryCount (default 1).
     """
-    return choice_name == get_prescribed_choice(dilemma, ordained_ethic)
+    for priority in ethic.moralPriorities:
+        for duty in (priority.overridingDuties or []):
+            obligated_concern = priority.moralConcern
+            beneficiary_concern = duty.beneficiaryMoralConcern
+
+            # Check if any effect benefits the beneficiary concern
+            beneficiary_count = 0
+            benefits_beneficiary = False
+            for effect in choice.effects:
+                if _effect_matches_concern(effect, beneficiary_concern):
+                    wnb = calculate_weighted_net_benefit(
+                        effect.possibleBenefits,
+                        alpha=ethic.alpha, beta=ethic.beta,
+                        lambda_=ethic.lambda_, gamma=ethic.gamma,
+                    )
+                    if wnb > 0:
+                        benefits_beneficiary = True
+                        unit_priority = MoralPriority(moralConcern=beneficiary_concern, importance=QualitativeMagnitude.ExtremelyHigh)
+                        beneficiary_count += int(calculate_importance(effect.affectedGroup, unit_priority))
+
+            if not benefits_beneficiary:
+                continue  # duty not triggered
+
+            # Check if any effect harms the obligated concern
+            for effect in choice.effects:
+                if _effect_matches_concern(effect, obligated_concern):
+                    wnb = calculate_weighted_net_benefit(
+                        effect.possibleBenefits,
+                        alpha=ethic.alpha, beta=ethic.beta,
+                        lambda_=ethic.lambda_, gamma=ethic.gamma,
+                    )
+                    if wnb < 0:  # detriment
+                        b_detriment = abs(wnb)
+                        eps = duty.inviolabilityBecomesSupererogatoryAtBeneficiaryCount or 1
+                        omega = duty.supererogatoryBecomesObligatoryAtBeneficiaryCount or 1
+                        b_eff = b_detriment / max(beneficiary_count, 1) / eps / omega
+                        inviolability = (
+                            duty.detrimentInviolabilityThreshold
+                            if duty.detrimentInviolabilityThreshold is not None
+                            else duty.obligatoryDetrimentThreshold
+                        )
+                        if b_eff > inviolability / 6.0:
+                            return False  # prohibited
+    return True  # permitted
+
+
+def _effect_matches_concern(effect: Effect, concern) -> bool:
+    """Check if an effect targets the same facet + outlook as a moral concern."""
+    return (
+        concern.facetOfProsperity is not None
+        and _facet_name(concern.facetOfProsperity) == _facet_name(effect.facetOfProsperity)
+        and concern.outlook == effect.outlook
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -507,8 +704,9 @@ def is_action_permitted(choice_name: str, dilemma, ordained_ethic: Ethic) -> boo
 
 def _concern_key(concern) -> str:
     """Stable string key uniquely identifying a MoralConcern."""
+    fname = _facet_name(concern.facetOfProsperity)
     if isinstance(concern, DemographicMoralConcern):
-        return f"demographic|{concern.facetOfProsperity}|{concern.outlook}|{concern.demographic.name}"
+        return f"demographic|{fname}|{concern.outlook}|{concern.demographic.name}"
     # CharacteristicBandMoralConcern
     parts = []
     for b in concern.characteristicBands:
@@ -521,7 +719,7 @@ def _concern_key(concern) -> str:
             hi = f"{b.maxValue:g}" if b.maxValue is not None else ""
             parts.append(f"num:{b.characteristic.name}:[{lo}..{hi}]")
     bands_str = ";".join(sorted(parts))
-    return f"characteristicBand|{concern.facetOfProsperity}|{concern.outlook}|{bands_str}"
+    return f"characteristicBand|{fname}|{concern.outlook}|{bands_str}"
 
 
 def extract_moral_concerns_from_dilemma(dilemma: Dilemma) -> list:
@@ -589,8 +787,9 @@ def extract_moral_concerns_from_dilemma(dilemma: Dilemma) -> list:
             if key not in seen:
                 seen[key] = concern
 
-        for chain in (effect.chainEffects or []):
-            visit_effect(chain)
+        for pb in (effect.possibleBenefits or []):
+            for chain in (pb.chainEffects or []):
+                visit_effect(chain)
 
     for choice in dilemma.choices:
         for effect in choice.effects:
@@ -602,7 +801,10 @@ def extract_moral_concerns_from_dilemma(dilemma: Dilemma) -> list:
 def _build_contribution_matrix(
     dilemma: Dilemma,
     concerns: list,
-    optimism_bias: float,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    lambda_: float = 1.0,
+    gamma: float = 1.0,
 ) -> list[list[float]]:
     """
     Returns A where A[i][k] = contribution of concern k (at unit importance = 1)
@@ -613,19 +815,23 @@ def _build_contribution_matrix(
     m = len(concerns)
     A = [[0.0] * m for _ in range(n)]
 
-    def contribution_of_effect(effect: Effect, choice_idx: int) -> None:
+    def contribution_of_effect(effect: Effect, choice_idx: int, path_weight: float = 1.0) -> None:
+        weight = path_weight * effect.likelihood
         for k, concern in enumerate(concerns):
             if (
-                concern.facetOfProsperity == effect.facetOfProsperity
+                concern.facetOfProsperity is not None
+                and _facet_name(concern.facetOfProsperity) == _facet_name(effect.facetOfProsperity)
                 and concern.outlook == effect.outlook
             ):
                 from .models import MoralPriority as MP  # local to avoid name clash
-                wnb = calculate_weighted_net_benefit(effect.possibleBenefits, optimism_bias)
+                wnb = calculate_weighted_net_benefit(effect.possibleBenefits, alpha=alpha, beta=beta, lambda_=lambda_, gamma=gamma)
                 unit_priority = MP(moralConcern=concern, importance=1.0)
                 imp = calculate_importance(effect.affectedGroup, unit_priority)
-                A[choice_idx][k] += wnb * imp
-        for chain in (effect.chainEffects or []):
-            contribution_of_effect(chain, choice_idx)
+                A[choice_idx][k] += weight * wnb * imp
+        # Chain effects from possible benefits, weighted by PB likelihood (CPT-weighted)
+        for pb in effect.possibleBenefits:
+            for chain in (pb.chainEffects or []):
+                contribution_of_effect(chain, choice_idx, path_weight=weight * _w(pb.likelihood, gamma))
 
     for i, choice in enumerate(dilemma.choices):
         for effect in choice.effects:
@@ -670,25 +876,47 @@ def _gaussian_elimination(C: list[list[float]], d: list[float]) -> list[float] |
 def infer_moral_priorities(
     dilemma: Dilemma,
     stated_preferabilities: list[StatedPreferability],
-    optimism_bias: float = 0.0,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    lambda_: float = 1.0,
+    gamma: float = 1.0,
+    method: str = "simplified",
 ) -> list:
     """
     Infers moral priorities (importance weights in [0, 1]) from the preferabilities
     assigned to choices in a moral dilemma.
 
-    Algorithm:
-    1. Auto-extract candidate MoralConcerns from the dilemma's effects.
-    2. Build contribution matrix A (n_choices × n_concerns), where A[i][k] is the
-       contribution of concern k at unit importance to the moral valence of choice i.
-    3. Solve for the importance vector x (clamped to [0, 1]):
-       - Over-determined (m ≤ n): least-squares via normal equations (A^T A)·x = A^T·b.
-         Zero-diagonal columns (zero-contribution concerns) are assigned importance 0.
-       - Under-determined (m > n): minimum-norm solution via (A A^T)·y = b, x = A^T·y.
-         This gives the shortest importance vector that is consistent with the
-         stated preferabilities.
+    Two methods are available:
 
-    Returns a list of MoralPriority with inferred importance values.
+    ``method="simplified"`` (default) — Vmax=1, Vmin=0 proxy (§3.10)
+        Maps each stated preferability ordinal to Vi = ordinal/6 (P^abs proxy),
+        solves V = A·m via least-squares or minimum-norm pseudoinverse, and
+        attaches interval bounds [m_d − W, m_d + W] with W = 1/7.
+
+    ``method="polytope"`` — interval-constrained linear programming
+        Treats each stated ordinal as a quantitative interval constraint
+        (e.g., ordinal 7 → [0.85, 1.0]).  For each concern, computes the
+        feasible range [m_min, m_max] via linear programming, plus a centroid
+        point estimate.  Returns a PolytopeInferenceResult instead of a
+        list of MoralPriority.
+
+    Algorithm (simplified):
+    1. Auto-extract candidate MoralConcerns from the dilemma's effects.
+    2. Build contribution matrix A (n_choices × n_concerns).
+    3. Convert stated preferabilities to Vi = ordinal/7.
+    4. Solve for the importance vector x (clamped to [0, 1]):
+       - Over-determined (m ≤ n): least-squares via (A^T A)·x = A^T·b.
+       - Under-determined (m > n): minimum-norm via (A A^T)·y = b, x = A^T·y.
+
+    Returns:
+        If method="simplified": list of MoralPriority with inferred importances.
+        If method="polytope": PolytopeInferenceResult with per-concern bounds.
     """
+    if method == "polytope":
+        return infer_moral_priorities_polytope(
+            dilemma, stated_preferabilities, alpha=alpha, beta=beta, lambda_=lambda_, gamma=gamma
+        )
+
     from .models import MoralPriority as MP
 
     concerns = extract_moral_concerns_from_dilemma(dilemma)
@@ -696,15 +924,24 @@ def infer_moral_priorities(
     if m == 0:
         return []
 
+    # Map stated ordinals to Vi = ordinal/6 (P^abs proxy: Vmax=1, Vmin=0)
     stated_map = {s.choiceName: int(s.statedPreferability) for s in stated_preferabilities}
     n = len(dilemma.choices)
-    b = [stated_map.get(c.name, 4) for c in dilemma.choices]  # default: Neutral (4)
+    b = [stated_map.get(c.name, 3) / 6.0 for c in dilemma.choices]  # default: Neutral (3/6)
 
-    A = _build_contribution_matrix(dilemma, concerns, optimism_bias)
+    A = _build_contribution_matrix(dilemma, concerns, alpha=alpha, beta=beta, lambda_=lambda_, gamma=gamma)
 
     # Check if A is all zeros
     if all(A[i][k] == 0.0 for i in range(n) for k in range(m)):
-        return [MP(moralConcern=c, importance=0.0) for c in concerns]
+        return [
+            MP(
+                moralConcern=c,
+                importance=0.0,
+                importanceLowerBound=0.0,
+                importanceUpperBound=PREFERABILITY_BUCKET_WIDTH,
+            )
+            for c in concerns
+        ]
 
     importances = [0.0] * m
 
@@ -733,7 +970,169 @@ def infer_moral_priorities(
                 val = sum(A[i][k] * solved_y[i] for i in range(n))
                 importances[k] = min(1.0, max(0.0, val))
 
-    return [MP(moralConcern=c, importance=importances[k]) for k, c in enumerate(concerns)]
+    return [
+        MP(
+            moralConcern=c,
+            importance=importances[k],
+            importanceLowerBound=max(0.0, importances[k] - PREFERABILITY_BUCKET_WIDTH),
+            importanceUpperBound=min(1.0, importances[k] + PREFERABILITY_BUCKET_WIDTH),
+        )
+        for k, c in enumerate(concerns)
+    ]
+
+
+def infer_moral_priorities_polytope(
+    dilemma: Dilemma,
+    stated_preferabilities: list[StatedPreferability],
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    lambda_: float = 1.0,
+    gamma: float = 1.0,
+) -> PolytopeInferenceResult:
+    """
+    Polytope approach to moral priority inference (Section 3.6 of the academic paper).
+
+    Treats each stated preferability ordinal as an interval constraint on the
+    quantitative moral valence Vi.  For each concern k, solves two linear programs:
+
+        minimize / maximize  m_k
+        subject to           A·m ∈ [V_i^min, V_i^max]  for all choices i
+                             0 ≤ m_k ≤ 1                for all concerns k
+
+    Where [V_i^min, V_i^max] is the quantitative bucket for the stated ordinal
+    (e.g., ordinal 7 → [0.85, 1.0]).
+
+    The centroid (m_min + m_max) / 2 serves as a point estimate.
+    When the system is under-determined the ranges may be wide;
+    when over-determined the polytope may be empty (feasible=False).
+
+    Requires scipy.optimize.linprog.  If scipy is unavailable, falls back to
+    the simplified approach and sets all bounds equal to the point estimate.
+    """
+    try:
+        from scipy.optimize import linprog  # type: ignore[import-untyped]
+        _HAS_SCIPY = True
+    except ImportError:
+        _HAS_SCIPY = False
+
+    concerns = extract_moral_concerns_from_dilemma(dilemma)
+    m = len(concerns)
+    if m == 0:
+        return PolytopeInferenceResult(
+            perConcern=[],
+            feasible=True,
+            meanCentroidImportance=0.0,
+        )
+
+    stated_map = {s.choiceName: int(s.statedPreferability) for s in stated_preferabilities}
+    n = len(dilemma.choices)
+
+    # Build valence interval constraints from stated preferabilities
+    V_bounds: list[tuple[float, float]] = []
+    for choice in dilemma.choices:
+        ordinal = stated_map.get(choice.name, 3)  # default Neutral
+        V_bounds.append(get_preferability_bounds(ordinal))
+
+    A = _build_contribution_matrix(dilemma, concerns, alpha=alpha, beta=beta, lambda_=lambda_, gamma=gamma)
+
+    if not _HAS_SCIPY:
+        # Fallback: simplified approach, duplicate bounds as point estimate
+        simplified = infer_moral_priorities(
+            dilemma, stated_preferabilities, alpha=alpha, beta=beta, lambda_=lambda_, gamma=gamma, method="simplified"
+        )
+        per_concern = []
+        for k, mp in enumerate(simplified):
+            val = float(mp.importance)
+            per_concern.append(PerConcernBounds(
+                moralConcern=mp.moralConcern,
+                minImportance=val,
+                maxImportance=val,
+                centroid=val,
+            ))
+        mean_centroid = sum(p.centroid for p in per_concern) / m if m > 0 else 0.0
+        return PolytopeInferenceResult(
+            perConcern=per_concern,
+            feasible=True,
+            meanCentroidImportance=mean_centroid,
+        )
+
+    # Check if A is all zeros
+    if all(A[i][k] == 0.0 for i in range(n) for k in range(m)):
+        per_concern = [
+            PerConcernBounds(
+                moralConcern=c,
+                minImportance=0.0,
+                maxImportance=0.0,
+                centroid=0.0,
+            )
+            for c in concerns
+        ]
+        return PolytopeInferenceResult(
+            perConcern=per_concern,
+            feasible=True,
+            meanCentroidImportance=0.0,
+        )
+
+    # For each concern k, solve min m_k and max m_k
+    # LP formulation: variables = [m_0, ..., m_{m-1}]
+    # Constraints: for each choice i:
+    #   V_i^min ≤ Σ_k A[i][k] · m_k ≤ V_i^max
+    #   0 ≤ m_k ≤ 1
+
+    per_concern: list[PerConcernBounds] = []
+    feasible_count = 0
+
+    for k in range(m):
+        # Objective coefficients for m_k
+        c_obj = [0.0] * m
+        c_obj[k] = 1.0
+
+        # Build inequality constraints: A_ub · x ≤ b_ub
+        # Upper bound: Σ A[i][j] · m_j ≤ V_i^max
+        # Lower bound: -Σ A[i][j] · m_j ≤ -V_i^min
+        A_ub = []
+        b_ub = []
+        for i in range(n):
+            A_ub.append(A[i][:])          # Σ A[i][j] · m_j ≤ V_i^max
+            b_ub.append(V_bounds[i][1])
+            A_ub.append([-v for v in A[i]])  # -Σ A[i][j] · m_j ≤ -V_i^min
+            b_ub.append(-V_bounds[i][0])
+
+        # Bounds: 0 ≤ m_j ≤ 1
+        bounds = [(0.0, 1.0) for _ in range(m)]
+
+        # Minimize m_k
+        res_min = linprog(c_obj, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+        min_val = res_min.fun if (res_min.success and res_min.fun is not None) else 0.0
+
+        # Maximize m_k (minimize -m_k)
+        c_obj_neg = [-v for v in c_obj]
+        res_max = linprog(c_obj_neg, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+        max_val = -res_max.fun if (res_max.success and res_max.fun is not None) else 1.0
+
+        feasible = res_min.success and res_max.success
+        if feasible:
+            feasible_count += 1
+
+        min_val = max(0.0, min(1.0, min_val))
+        max_val = max(0.0, min(1.0, max_val))
+        if max_val < min_val:
+            max_val = min_val  # clamp crossed bounds
+
+        per_concern.append(PerConcernBounds(
+            moralConcern=concerns[k],
+            minImportance=min_val,
+            maxImportance=max_val,
+            centroid=(min_val + max_val) / 2.0,
+        ))
+
+    mean_centroid = sum(p.centroid for p in per_concern) / m if m > 0 else 0.0
+
+    return PolytopeInferenceResult(
+        perConcern=per_concern,
+        feasible=(feasible_count == m),
+        meanCentroidImportance=mean_centroid,
+    )
 
 
 def calculate_moral_priority_divergence_signal(
@@ -755,10 +1154,13 @@ def calculate_moral_priority_divergence_signal(
     for pp in purported_priorities:
         imp = pp.importance
         if isinstance(imp, int):
-            normalized = imp / 7.0
+            normalized = imp / 6.0
         else:
             f = float(imp)
-            normalized = f / 7.0 if f > 1.0 else f
+            if f % 1 == 0 and 0.0 <= f <= 6.0:
+                normalized = f / 6.0
+            else:
+                normalized = f
         purported_map[_concern_key(pp.moralConcern)] = normalized
 
     per_concern: list[MoralPriorityDivergenceResult] = []
@@ -776,7 +1178,14 @@ def calculate_moral_priority_divergence_signal(
         ))
 
     mean = sum(r.absoluteDivergence for r in per_concern) / len(per_concern) if per_concern else 0.0
-    return MoralPriorityDivergenceSignal(perConcern=per_concern, meanAbsoluteDivergence=mean)
+    total = sum(r.absoluteDivergence for r in per_concern)
+    return MoralPriorityDivergenceSignal(
+        perConcern=per_concern,
+        meanAbsoluteDivergence=mean,
+        totalNormativeDivergence=total,
+        meanNormativeDivergence=mean,
+        normativeDivergenceBand=classify_divergence_band(mean),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -788,15 +1197,11 @@ def _build_worked_example():
     Constructs the AV dilemma worked example from first principles.
     Returns (dilemma, ethic, stated_preferabilities).
 
-    Exact moral valences (derived analytically):
-      Choice 1: -354/49  ≈ -7.2245
-      Choice 2: -183/49  ≈ -3.7347
-      Choice 3: -969/245 - 0.00045 ≈ -3.9556
-      Choice 4: -5/7     ≈ -0.7143
-
-    The white paper's stated values (-7.20, -3.72, -3.00045, -0.71) used rounded
-    intermediates and contain an arithmetic error in Choice 3 (4.28 × 0.74 was written
-    as -2.22 instead of -3.17). Exact arithmetic gives the correct values above.
+    Exact moral valences with /6 normalisation (alpha=beta=lambda=gamma=1):
+      Choice 1: -133/20 = -6.6500
+      Choice 2: -85/24  ≈ -3.5417
+      Choice 3: ≈ -3.6670  (-35/12 - 0.00035 - 3/4)
+      Choice 4: -2/3    ≈ -0.6667
     """
     from .models import (
         BooleanCharacteristic, BooleanCharacteristicValue,
@@ -884,7 +1289,6 @@ def _build_worked_example():
 
     ethic = Ethic(
         name="Worked Example Ethic",
-        optimismBias=0.0,
         moralPriorities=[
             MoralPriority(
                 moralConcern=DemographicMoralConcern(demographic=D1, facetOfProsperity="health", outlook="short-term"),
@@ -964,16 +1368,6 @@ def _build_worked_example():
                         _b(0.5, quantitative=0.0, metric="normalized", signage="zero"),
                         _b(0.5, quantitative=0.28, metric="normalized"),
                     ],
-                    chainEffects=[
-                        Effect(affectedGroup=G1, facetOfProsperity="health", outlook="long-term", possibleBenefits=[
-                            _b(0.3, qualitative=QM.VeryHigh),
-                            _b(0.7, qualitative=QM.Negligible, signage="zero"),
-                        ]),
-                        Effect(affectedGroup=G2, facetOfProsperity="health", outlook="long-term", possibleBenefits=[
-                            _b(0.4, qualitative=QM.SomewhatHigh),
-                            _b(0.6, qualitative=QM.Negligible, signage="zero"),
-                        ]),
-                    ],
                 ),
             ]),
             Choice(name="Choice 4", effects=[
@@ -983,12 +1377,312 @@ def _build_worked_example():
             ]),
         ],
     )
+    # Attach chain effects to the PBs of Choice 3's long-term wealth effect.
+    # Both PBs (50% no loss, 50% $400k loss) trigger the same health LT chains.
+    c3_wealth_lt = dilemma.choices[2].effects[2]
+    for pb in c3_wealth_lt.possibleBenefits:
+        pb.chainEffects = [
+            Effect(affectedGroup=G1, facetOfProsperity="health", outlook="long-term", possibleBenefits=[
+                _b(0.3, qualitative=QM.VeryHigh),
+                _b(0.7, qualitative=QM.Negligible, signage="zero"),
+            ]),
+            Effect(affectedGroup=G2, facetOfProsperity="health", outlook="long-term", possibleBenefits=[
+                _b(0.4, qualitative=QM.SomewhatHigh),
+                _b(0.6, qualitative=QM.Negligible, signage="zero"),
+            ]),
+        ]
 
     stated = [
         StatedPreferability(choiceName="Choice 1", statedPreferability=QualitativePreferability.ExtremelyUnpreferable),
         StatedPreferability(choiceName="Choice 2", statedPreferability=QualitativePreferability.SomewhatPreferable),
         StatedPreferability(choiceName="Choice 3", statedPreferability=QualitativePreferability.SomewhatUnpreferable),
         StatedPreferability(choiceName="Choice 4", statedPreferability=QualitativePreferability.ExtremelyUnpreferable),
+    ]
+
+    return dilemma, ethic, stated
+
+
+
+def _build_hostage_dilemma():
+    """
+    Constructs the hostage dilemma worked example from the academic paper
+    "The Invariance of Moral Calculus" (Appendix A).
+
+    Returns (dilemma, ethic, stated_preferabilities).
+
+    Scenario: Scientists have taken hostages and threaten to detonate a bomb
+    destroying life-saving technology. A family driving by has three choices:
+      1. Become hostages (enabling ransom → save technology)
+      2. Flee (risking collision with fleeing hostages, likely detonation)
+      3. Run over the hostage-takers (risking attack but may stop detonation)
+
+    Groups: Family (3 children + 2 adults), Hostages (4 adults + 2 scientists),
+            Boss (1 tech entrepreneur), Scientists (4 high-skill adults).
+    """
+    from .models import (
+        BooleanCharacteristic as BC,
+        StringCharacteristic as SC, StringCharacteristicValue as SCV,
+        NumericalCharacteristic as NC, NumericalCharacteristicValueBand as NCVB,
+        Demographic, DemographicMembership, DemographicMoralConcern,
+        MoralPriority as MP, ConversionMetric,
+        PossibleBenefit as PB, Effect, Choice, Dilemma, Ethic,
+        QualitativeMagnitude as QM, QualitativePreferability as QP,
+        StatedPreferability,
+    )
+
+    # --- Characteristics ---
+    C1 = BC(name="Is related to agent")
+    C2 = NC(name="Percentage fault for moral conflict arising", minValue=0, maxValue=100)
+    C3 = NC(name="Age", minValue=0)
+    C4 = SC(name="Socioeconomic class", possibleValues=["Poor", "Middle-class", "Upper middle-class", "Rich"])
+    C5 = SC(name="Skillset value", possibleValues=["Negligible", "Very low", "Somewhat low", "Moderate", "Somewhat high", "Very high", "Extremely high"])
+
+    # --- Demographics ---
+    D1 = Demographic(
+        name="Demographic 1",
+        numericalBands=[NCVB(characteristic=C3, minValue=0, maxValue=18)],
+        stringValues=[SCV(characteristic=C5, value="Negligible")],
+    )
+    D2 = Demographic(
+        name="Demographic 2",
+        numericalBands=[NCVB(characteristic=C3, minValue=18, maxValue=60)],
+        stringValues=[SCV(characteristic=C4, value="Middle-class")],
+    )
+    D3 = Demographic(
+        name="Demographic 3",
+        numericalBands=[NCVB(characteristic=C3, minValue=30, maxValue=60)],
+        stringValues=[
+            SCV(characteristic=C4, value="Upper middle-class"),
+            SCV(characteristic=C5, value="Extremely high"),
+        ],
+    )
+    D4 = Demographic(
+        name="Demographic 4",
+        numericalBands=[NCVB(characteristic=C3, minValue=18, maxValue=80)],
+        stringValues=[
+            SCV(characteristic=C4, value="Rich"),
+            SCV(characteristic=C5, value="Extremely high"),
+        ],
+    )
+
+    # --- Groups (with circumstantial adjustments per the paper) ---
+    G1 = Group(
+        name="Group 1",
+        circumstantialAdjustment=5/6,  # relatedness bonus (5/6 of max importance unit)
+        demographicMemberships=[
+            DemographicMembership(demographic=D1, count=3),
+            DemographicMembership(demographic=D2, count=2),
+        ],
+    )
+    G2 = Group(
+        name="Group 2",
+        demographicMemberships=[
+            DemographicMembership(demographic=D2, count=4),
+            DemographicMembership(demographic=D3, count=2),
+        ],
+    )
+    G3 = Group(
+        name="Group 3",
+        circumstantialAdjustment=-2/6,  # moderate fault
+        demographicMemberships=[DemographicMembership(demographic=D4, count=1)],
+    )
+    G4 = Group(
+        name="Group 4",
+        circumstantialAdjustment=-5/6,  # high fault
+        demographicMemberships=[DemographicMembership(demographic=D3, count=4)],
+    )
+
+    # --- Reusable chain: job loss from detonation ---
+    det_chain_jobloss = Effect(
+        affectedGroup=G2, facetOfProsperity="wealth", outlook="short-term",
+        possibleBenefits=[
+            PB(likelihood=1.0, qualitativeMagnitude=QM.SomewhatHigh, signage="negative"),
+        ],
+    )
+
+    # --- Choice 1: Agree to Be Taken Hostage ---
+    # Effect 1: Family stress (short-term health)
+    #   PB1 (90%): somewhat high detriment → chain: boss ransom payment
+    #     CE1.1 (boss_ransom): PBs have their own chain effects per the paper:
+    #       PB1 (60%): -$40M → Scientists get ransom + 90% nondet / 10% det
+    #       PB2 (30%): -$20M → Scientists get ransom + 80% nondet / 20% det
+    #       PB3 (10%): $0    → 25% nondet / 75% det
+    #   PB2 (10%): extremely high detriment → chain: accidental (60% det / 40% nondet)
+
+    # Helper: create a non-detonation health-LT effect for a group with given likelihood
+    def _nondet(group, L=1.0):
+        return Effect(
+            affectedGroup=group, facetOfProsperity="health", outlook="long-term", likelihood=L,
+            possibleBenefits=[
+                PB(likelihood=0.7, qualitativeMagnitude=QM.Moderate, signage="positive"),
+                PB(likelihood=0.3, qualitativeMagnitude=QM.SomewhatHigh, signage="positive"),
+            ],
+        )
+
+    # Helper: create a detonation wealth-LT effect for G3 with given likelihood
+    def _det(L=1.0):
+        e = Effect(
+            affectedGroup=G3, facetOfProsperity="wealth", outlook="long-term", likelihood=L,
+            possibleBenefits=[
+                PB(likelihood=0.6, quantitativeMagnitude=1.0, quantitativeMetric="normalized", signage="negative"),
+                PB(likelihood=0.4, quantitativeMagnitude=0.5, quantitativeMetric="normalized", signage="negative"),
+            ],
+        )
+        # Detonation's PB (100%) triggers job loss
+        for pb in e.possibleBenefits:
+            pb.chainEffects = [det_chain_jobloss]
+        return e
+
+    # Scientists receive ransom money
+    ransom_receipt = Effect(
+        affectedGroup=G4, facetOfProsperity="wealth", outlook="long-term",
+        possibleBenefits=[
+            PB(likelihood=1.0, qualitativeMagnitude=QM.ExtremelyHigh, signage="positive"),
+        ],
+    )
+
+    boss_ransom = Effect(
+        affectedGroup=G3, facetOfProsperity="wealth", outlook="long-term",
+        possibleBenefits=[
+            # PB1 (60%): -$40M → ransom receipt + 90% nondet / 10% det
+            PB(likelihood=0.6, quantitativeMagnitude=0.4, quantitativeMetric="normalized", signage="negative",
+               chainEffects=[ransom_receipt, _nondet(G1,0.9), _nondet(G2,0.9), _nondet(G3,0.9), _nondet(G4,0.9), _det(0.1)]),
+            # PB2 (30%): -$20M → ransom receipt (lower stakes) + 80% nondet / 20% det
+            PB(likelihood=0.3, quantitativeMagnitude=0.2, quantitativeMetric="normalized", signage="negative",
+               chainEffects=[ransom_receipt, _nondet(G1,0.8), _nondet(G2,0.8), _nondet(G3,0.8), _nondet(G4,0.8), _det(0.2)]),
+            # PB3 (10%): $0 → 25% nondet / 75% det
+            PB(likelihood=0.1, quantitativeMagnitude=0.0, quantitativeMetric="normalized", signage="zero",
+               chainEffects=[_nondet(G1,0.25), _nondet(G2,0.25), _nondet(G3,0.25), _nondet(G4,0.25), _det(0.75)]),
+        ],
+    )
+
+    # Chain effect from PB2 of choice1_family_stress (10%: accidental attack → 60% det / 40% nondet)
+    accidental_chain = Effect(
+        affectedGroup=G1, facetOfProsperity="health", outlook="long-term",
+        possibleBenefits=[
+            PB(likelihood=0.7, qualitativeMagnitude=QM.Moderate, signage="positive",
+               chainEffects=[_nondet(G2,0.4), _nondet(G3,0.4), _nondet(G4,0.4), _det(0.6)]),
+            PB(likelihood=0.3, qualitativeMagnitude=QM.SomewhatHigh, signage="positive",
+               chainEffects=[_nondet(G2,0.4), _nondet(G3,0.4), _nondet(G4,0.4), _det(0.6)]),
+        ],
+    )
+
+    choice1_family_stress = Effect(
+        affectedGroup=G1, facetOfProsperity="health", outlook="short-term",
+        possibleBenefits=[
+            PB(likelihood=0.9, qualitativeMagnitude=QM.SomewhatHigh, signage="negative",
+               chainEffects=[boss_ransom]),
+            PB(likelihood=0.1, qualitativeMagnitude=QM.ExtremelyHigh, signage="negative",
+               chainEffects=[accidental_chain]),
+        ],
+    )
+
+    C1 = Choice(
+        name="Choice 1",
+        description="Agree to be taken hostage",
+        effects=[choice1_family_stress],
+    )
+
+    # --- Choice 2: Flee (detonation 95%, non-detonation 5%) ---
+    # Detonation effect: both PBs (60% $100M loss, 40% $50M loss) trigger job loss chain
+    det_95 = Effect(
+        affectedGroup=G3, facetOfProsperity="wealth", outlook="long-term", likelihood=0.95,
+        possibleBenefits=[
+            PB(likelihood=0.6, quantitativeMagnitude=1.0, quantitativeMetric="normalized", signage="negative",
+               chainEffects=[det_chain_jobloss]),
+            PB(likelihood=0.4, quantitativeMagnitude=0.5, quantitativeMetric="normalized", signage="negative",
+               chainEffects=[det_chain_jobloss]),
+        ],
+    )
+
+    C2 = Choice(
+        name="Choice 2",
+        description="Flee, risking collision with hostages",
+        effects=[
+            Effect(
+                affectedGroup=G2, facetOfProsperity="health", outlook="short-term",
+                possibleBenefits=[
+                    PB(likelihood=0.55, qualitativeMagnitude=QM.Negligible, signage="negative"),
+                    PB(likelihood=0.45, qualitativeMagnitude=QM.ExtremelyHigh, signage="negative"),
+                ],
+            ),
+            det_95,
+            # 5% non-detonation (same distribution for all four groups)
+            _nondet(G1, 0.05), _nondet(G2, 0.05), _nondet(G3, 0.05), _nondet(G4, 0.05),
+        ],
+    )
+
+    # --- Choice 3: Run Over the Hostage-Takers (non-detonation 80%, detonation 20%) ---
+    # PB1 (50%), PB3 (20%), PB4 (10%) → non-detonation; PB2 (20%) → detonation
+    det_20 = Effect(
+        affectedGroup=G3, facetOfProsperity="wealth", outlook="long-term", likelihood=0.2,
+        possibleBenefits=[
+            PB(likelihood=0.6, quantitativeMagnitude=1.0, quantitativeMetric="normalized", signage="negative",
+               chainEffects=[det_chain_jobloss]),
+            PB(likelihood=0.4, quantitativeMagnitude=0.5, quantitativeMetric="normalized", signage="negative",
+               chainEffects=[det_chain_jobloss]),
+        ],
+    )
+
+    C3 = Choice(
+        name="Choice 3",
+        description="Drive into the hostage-takers",
+        effects=[
+            Effect(
+                affectedGroup=G1, facetOfProsperity="health", outlook="short-term",
+                possibleBenefits=[
+                    PB(likelihood=0.5, qualitativeMagnitude=QM.Negligible, signage="negative"),
+                    PB(likelihood=0.3, qualitativeMagnitude=QM.VeryHigh, signage="negative"),
+                    PB(likelihood=0.2, qualitativeMagnitude=QM.ExtremelyHigh, signage="negative"),
+                ],
+            ),
+            Effect(
+                affectedGroup=G4, facetOfProsperity="health", outlook="short-term",
+                possibleBenefits=[
+                    PB(likelihood=0.5, qualitativeMagnitude=QM.SomewhatHigh, signage="negative",
+                       chainEffects=[_nondet(G1,0.8), _nondet(G2,0.8), _nondet(G3,0.8), _nondet(G4,0.8)]),
+                    PB(likelihood=0.2, qualitativeMagnitude=QM.Negligible, signage="zero",
+                       chainEffects=[det_20]),
+                    PB(likelihood=0.2, qualitativeMagnitude=QM.VeryHigh, signage="negative",
+                       chainEffects=[_nondet(G1,0.8), _nondet(G2,0.8), _nondet(G3,0.8), _nondet(G4,0.8)]),
+                    PB(likelihood=0.1, qualitativeMagnitude=QM.ExtremelyHigh, signage="negative",
+                       chainEffects=[_nondet(G1,0.8), _nondet(G2,0.8), _nondet(G3,0.8), _nondet(G4,0.8)]),
+                ],
+            ),
+        ],
+    )
+
+    dilemma = Dilemma(
+        name="Hostage Dilemma",
+        description="Scientists threaten to detonate life-saving technology. A family driving by must choose: become hostages, flee, or attack.",
+        choices=[C1, C2, C3],
+    )
+
+    # --- Ethic ---
+    ethic = Ethic(
+        name="Hostage Scenario Ethic",
+        conversionMetrics=[
+            ConversionMetric(fromMetric="USD", extremelyBeneficialThreshold=100_000),
+            ConversionMetric(fromMetric="USD", extremelyBeneficialThreshold=10_000_000, scope=D4),
+        ],
+        moralPriorities=[
+            MP(moralConcern=DemographicMoralConcern(demographic=D1, facetOfProsperity="health", outlook="short-term"), importance=QM.ExtremelyHigh),
+            MP(moralConcern=DemographicMoralConcern(demographic=D1, facetOfProsperity="health", outlook="long-term"), importance=QM.VeryHigh),
+            MP(moralConcern=DemographicMoralConcern(demographic=D3, facetOfProsperity="health", outlook="short-term"), importance=QM.VeryHigh),
+            MP(moralConcern=DemographicMoralConcern(demographic=D3, facetOfProsperity="health", outlook="long-term"), importance=QM.SomewhatHigh),
+            MP(moralConcern=DemographicMoralConcern(demographic=D2, facetOfProsperity="health", outlook="short-term"), importance=QM.SomewhatHigh),
+            MP(moralConcern=DemographicMoralConcern(demographic=D4, facetOfProsperity="health", outlook="long-term"), importance=QM.Moderate),
+            MP(moralConcern=DemographicMoralConcern(demographic=D2, facetOfProsperity="health", outlook="long-term"), importance=QM.SomewhatLow),
+            MP(moralConcern=DemographicMoralConcern(demographic=D4, facetOfProsperity="wealth", outlook="long-term"), importance=QM.SomewhatLow),
+            MP(moralConcern=DemographicMoralConcern(demographic=D3, facetOfProsperity="wealth", outlook="short-term"), importance=QM.Negligible),
+        ],
+    )
+
+    # Stated preferabilities: Choice 1 best, Choice 2 slightly less, Choice 3 much less
+    stated = [
+        StatedPreferability(choiceName="Choice 1", statedPreferability=QP.ExtremelyPreferable),
+        StatedPreferability(choiceName="Choice 2", statedPreferability=QP.VeryPreferable),
+        StatedPreferability(choiceName="Choice 3", statedPreferability=QP.ExtremelyUnpreferable),
     ]
 
     return dilemma, ethic, stated

@@ -16,31 +16,42 @@
 export type Signage = "positive" | "negative" | "zero";
 
 /**
- * 7-value qualitative scale for benefit magnitude, likelihood, and moral priority importance.
- * Ordinal values (1–7) map to quantitative fractions: ordinal / 7.
+ * 7-value qualitative scale for benefit magnitude and moral priority importance.
+ * Ordinal values (0–6) map to quantitative fractions: ordinal / 6.
  */
 export enum QualitativeMagnitude {
-  Negligible = 1,
-  VeryLow = 2,
-  SomewhatLow = 3,
-  Moderate = 4,
-  SomewhatHigh = 5,
-  VeryHigh = 6,
-  ExtremelyHigh = 7,
+  Negligible = 0,
+  VeryLow = 1,
+  SomewhatLow = 2,
+  Moderate = 3,
+  SomewhatHigh = 4,
+  VeryHigh = 5,
+  ExtremelyHigh = 6,
+}
+
+export enum QualitativeDifferenceMagnitude {
+  EquallyImportant = 0,
+  MarginallyMoreOrLessPreferable = 1,
+  SlightlyMoreOrLessPreferable = 2,
+  ConsiderablyMoreOrLessPreferable = 3,
+  MuchMoreOrLessPreferable = 4,
+  GreatlyMoreOrLessPreferable = 5,
+  OverwhelminglyMoreOrLess = 6,
 }
 
 /**
  * 7-value qualitative scale for the preferability of a choice.
- * Mapped from moral valences via min-max normalization onto 7 equal buckets.
+ * Mapped from moral valences via absolute preferability (P^abs = V_i / V_max) onto 7 equal buckets.
+ * Ordinal values (0–6) map to equal-width intervals in [0, 1].
  */
 export enum QualitativePreferability {
-  ExtremelyUnpreferable = 1,
-  VeryUnpreferable = 2,
-  SomewhatUnpreferable = 3,
-  Neutral = 4,
-  SomewhatPreferable = 5,
-  VeryPreferable = 6,
-  ExtremelyPreferable = 7,
+  ExtremelyUnpreferable = 0,
+  VeryUnpreferable = 1,
+  SomewhatUnpreferable = 2,
+  Neutral = 3,
+  SomewhatPreferable = 4,
+  VeryPreferable = 5,
+  ExtremelyPreferable = 6,
 }
 
 // ---------------------------------------------------------------------------
@@ -71,10 +82,19 @@ export type NumericalCharacteristic = Characteristic & {
   defaultValue?: number;
 };
 
+/**
+ * A dimension of well-being (e.g. health, wealth, autonomy).
+ * When referenced as a plain string, the string is the characteristic name.
+ */
+export type ProsperityCharacteristic = Characteristic & {
+  kind: "prosperity";
+};
+
 export type AnyCharacteristic =
   | BooleanCharacteristic
   | StringCharacteristic
-  | NumericalCharacteristic;
+  | NumericalCharacteristic
+  | ProsperityCharacteristic;
 
 // ---------------------------------------------------------------------------
 // Characteristic values (used to describe individuals and demographics)
@@ -199,6 +219,8 @@ export type PossibleBenefit = {
   quantitativeMetric?: string;
   signage: Signage;
   description?: string;
+  /** Downstream effects triggered by this possible benefit. */
+  chainEffects?: Effect[];
 };
 
 // ---------------------------------------------------------------------------
@@ -211,11 +233,10 @@ export type PossibleBenefit = {
  */
 export type Effect = {
   affectedGroup: Group;
-  facetOfProsperity: string;
+  facetOfProsperity: string | ProsperityCharacteristic;
   /** e.g. "short-term" | "long-term" */
   outlook: string;
   possibleBenefits: PossibleBenefit[];
-  chainEffects?: Effect[];
 };
 
 // ---------------------------------------------------------------------------
@@ -225,6 +246,8 @@ export type Effect = {
 export type Choice = {
   name: string;
   description?: string;
+  /** Label for behavior-based proscription matching (see Ethic.proscribedBehaviors). */
+  behavior?: string;
   effects: Effect[];
 };
 
@@ -240,7 +263,7 @@ export type Choice = {
 export type DemographicMoralConcern = {
   kind: "demographic";
   demographic: Demographic;
-  facetOfProsperity: string;
+  facetOfProsperity: string | ProsperityCharacteristic;
   outlook: string;
 };
 
@@ -253,7 +276,7 @@ export type DemographicMoralConcern = {
 export type CharacteristicBandMoralConcern = {
   kind: "characteristicBand";
   characteristicBands: AnyCharacteristicValue[];
-  facetOfProsperity: string;
+  facetOfProsperity: string | ProsperityCharacteristic;
   outlook: string;
 };
 
@@ -272,8 +295,35 @@ export type MoralConcern =
  */
 export type MoralPriority = {
   moralConcern: MoralConcern;
-  importance: QualitativeMagnitude | number;
+  minStatus?: QualitativeMagnitude;
+  loweringBelowMinStatusIsCategoricallyProhibited?: boolean;
+  maxStatus?: QualitativeMagnitude;
+  raisingAboveMaxStatusIsCategoricallyProhibited?: boolean;
+  rank?: number;
+  quantitativeImportance?: number;
+  qualitativeImportance?: QualitativeMagnitude;
+  //qualitativeDifferenceImportanceFromNextLowestPriority cannot be defined if either qualitativeImportance
+  // or quantitativeImportance are defined; you're either making an absolute comparison or a relative comparison, not both
+  qualitativeDifferenceInImportanceFromNextLowestPriority?: QualitativeDifferenceMagnitude;
+  // detrimentInviolabilityThreshold?: QualitativeMagnitude;
+  overridingDuties?: OverridingDuty[];
 };
+
+//violating these considerations is categorically proscribed unless all choices available
+//are categorically proscribed, in which case need to compute morality of all choices and
+//determine least bad option
+export type OverridingDuty = {
+  beneficiaryMoralConcern: MoralConcern;
+  obligatoryDetrimentThreshold: QualitativeMagnitude; //between this as inviolability threshold is supererogatory
+  // supererogatoryDetrimentThreshold: QualitativeMagnitude;
+  supererogatoryBecomesObligatoryAtBeneficiaryCount?: number;
+  detrimentInviolabilityThreshold?: QualitativeMagnitude; //beyond this threshold is "too nice", being prohibited
+  inviolabilityBecomesSupererogatoryAtBeneficiaryCount?: number; //must be less than or equal to supererogatory beneficiary count
+};
+
+// enum OverridingObligationTiebreakApproach {
+
+// }
 
 // ---------------------------------------------------------------------------
 // Conversion metrics
@@ -298,14 +348,22 @@ export type ConversionMetric = {
 export type Ethic = {
   name: string;
   moralPriorities: MoralPriority[];
-  /**
-   * 0 = pure expected value (likelihoods fully weighted).
-   * 1 = pure optimism (only best outcome considered).
-   * Values between 0 and 1 interpolate monotonically.
-   */
-  optimismBias: number;
+  /** CPT probability-weighting curvature. γ = 1 yields linear weighting (default). */
+  gamma?: number;
+  /** CPT value-function parameters. α governs diminishing sensitivity to gains,
+   *  β governs diminishing sensitivity to losses, λ governs loss aversion.
+   *  Defaults: α = β = λ = 1 (no distortion). */
+  alpha?: number;
+  beta?: number;
+  lambda?: number;
+  /** Ambiguity parameter. Collapses probability ranges [pLow, pHigh] via
+   *  pEff = a · pLow + (1−a) · pHigh. 0 = optimistic, 0.5 = indifference, 1 = maximin. */
+  ambiguityAversion?: number;
   conversionMetrics?: ConversionMetric[];
+  proscribedBehaviors?: string[];
 };
+
+export type Outcome = {};
 
 // ---------------------------------------------------------------------------
 // Dilemma

@@ -1,0 +1,100 @@
+{
+  "_note": "Hostage dilemma from the academic paper Appendix A. Values computed by _build_hostage_dilemma() with /6 normalisation and default CPT params.",
+  "expectedResults": {
+    "moralValences": {
+      "Choice 1": -0.045987,
+      "Choice 2": -1.68875,
+      "Choice 3": -0.856
+    },
+    "calculatedPreferabilities": {
+      "Choice 1": 6,
+      "Choice 2": 0,
+      "Choice 3": 3
+    },
+    "prescribedChoice": "Choice 1",
+    "inferredMoralPriorities": {
+      "demographic|health|short-term|Demographic 1": 0.0,
+      "demographic|health|short-term|Demographic 2": 0.0,
+      "demographic|wealth|long-term|Demographic 4": 0.8189995524355483,
+      "demographic|wealth|long-term|Demographic 3": 0.0,
+      "demographic|health|long-term|Demographic 1": 0.0,
+      "demographic|health|long-term|Demographic 2": 0.0,
+      "demographic|health|long-term|Demographic 3": 0.0,
+      "demographic|health|long-term|Demographic 4": 0.1683755581401815,
+      "demographic|wealth|short-term|Demographic 2": 0.0,
+      "demographic|wealth|short-term|Demographic 3": 0.0,
+      "demographic|health|short-term|Demographic 3": 0.0
+    },
+    "moralPriorityDivergenceSignalFromStatedPreferabilities": {
+      "meanAbsoluteDivergence": 0.4682385449359424,
+      "perConcern": {
+        "demographic|health|short-term|Demographic 1": {
+          "purportedImportance": 1.0,
+          "inferredImportance": 0.0,
+          "signedDivergence": 1.0,
+          "absoluteDivergence": 1.0
+        },
+        "demographic|health|short-term|Demographic 2": {
+          "purportedImportance": 0.6666666666666666,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.6666666666666666,
+          "absoluteDivergence": 0.6666666666666666
+        },
+        "demographic|wealth|long-term|Demographic 4": {
+          "purportedImportance": 0.3333333333333333,
+          "inferredImportance": 0.8189995524355483,
+          "signedDivergence": -0.485666219102215,
+          "absoluteDivergence": 0.485666219102215
+        },
+        "demographic|wealth|long-term|Demographic 3": {
+          "purportedImportance": 0.0,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.0,
+          "absoluteDivergence": 0.0
+        },
+        "demographic|health|long-term|Demographic 1": {
+          "purportedImportance": 0.8333333333333334,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.8333333333333334,
+          "absoluteDivergence": 0.8333333333333334
+        },
+        "demographic|health|long-term|Demographic 2": {
+          "purportedImportance": 0.3333333333333333,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.3333333333333333,
+          "absoluteDivergence": 0.3333333333333333
+        },
+        "demographic|health|long-term|Demographic 3": {
+          "purportedImportance": 0.6666666666666666,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.6666666666666666,
+          "absoluteDivergence": 0.6666666666666666
+        },
+        "demographic|health|long-term|Demographic 4": {
+          "purportedImportance": 0.5,
+          "inferredImportance": 0.1683755581401815,
+          "signedDivergence": 0.3316244418598185,
+          "absoluteDivergence": 0.3316244418598185
+        },
+        "demographic|wealth|short-term|Demographic 2": {
+          "purportedImportance": 0.0,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.0,
+          "absoluteDivergence": 0.0
+        },
+        "demographic|wealth|short-term|Demographic 3": {
+          "purportedImportance": 0.0,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.0,
+          "absoluteDivergence": 0.0
+        },
+        "demographic|health|short-term|Demographic 3": {
+          "purportedImportance": 0.8333333333333334,
+          "inferredImportance": 0.0,
+          "signedDivergence": 0.8333333333333334,
+          "absoluteDivergence": 0.8333333333333334
+        }
+      }
+    }
+  }
+}

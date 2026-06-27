@@ -8,38 +8,42 @@
         "description": "Collide with Group 2 (default: continue current trajectory)",
         "effects": [
           {
-            "affectedGroup": { "name": "Group 1" },
+            "affectedGroup": {
+              "name": "Group 1"
+            },
             "facetOfProsperity": "health",
             "outlook": "short-term",
             "possibleBenefits": [
               {
                 "likelihood": 0.8,
-                "qualitativeMagnitude": 5,
+                "qualitativeMagnitude": 4,
                 "signage": "negative",
                 "description": "High likelihood of being somewhat detrimental"
               },
               {
                 "likelihood": 0.2,
-                "qualitativeMagnitude": 6,
+                "qualitativeMagnitude": 5,
                 "signage": "negative",
                 "description": "Low likelihood of being very detrimental"
               }
             ]
           },
           {
-            "affectedGroup": { "name": "Group 2" },
+            "affectedGroup": {
+              "name": "Group 2"
+            },
             "facetOfProsperity": "health",
             "outlook": "short-term",
             "possibleBenefits": [
               {
                 "likelihood": 0.6,
-                "qualitativeMagnitude": 7,
+                "qualitativeMagnitude": 6,
                 "signage": "negative",
                 "description": "Somewhat high likelihood of being extremely detrimental"
               },
               {
                 "likelihood": 0.4,
-                "qualitativeMagnitude": 6,
+                "qualitativeMagnitude": 5,
                 "signage": "negative",
                 "description": "Somewhat low likelihood of being very detrimental"
               }
@@ -52,19 +56,21 @@
         "description": "Collide with a stationary object",
         "effects": [
           {
-            "affectedGroup": { "name": "Group 1" },
+            "affectedGroup": {
+              "name": "Group 1"
+            },
             "facetOfProsperity": "health",
             "outlook": "short-term",
             "possibleBenefits": [
               {
                 "likelihood": 0.9,
-                "qualitativeMagnitude": 6,
+                "qualitativeMagnitude": 5,
                 "signage": "negative",
                 "description": "Very high likelihood of being very detrimental"
               },
               {
                 "likelihood": 0.1,
-                "qualitativeMagnitude": 7,
+                "qualitativeMagnitude": 6,
                 "signage": "negative",
                 "description": "Very low likelihood of being extremely detrimental"
               }
@@ -77,26 +83,30 @@
         "description": "Collide with life-saving experimental technology (indirectly impacting Groups 1 and 2 long-term)",
         "effects": [
           {
-            "affectedGroup": { "name": "Group 1" },
+            "affectedGroup": {
+              "name": "Group 1"
+            },
             "facetOfProsperity": "health",
             "outlook": "short-term",
             "possibleBenefits": [
               {
                 "likelihood": 0.8,
-                "qualitativeMagnitude": 5,
+                "qualitativeMagnitude": 4,
                 "signage": "negative",
                 "description": "Very high likelihood of being somewhat detrimental"
               },
               {
                 "likelihood": 0.2,
-                "qualitativeMagnitude": 6,
+                "qualitativeMagnitude": 5,
                 "signage": "negative",
                 "description": "Very low likelihood of being very detrimental"
               }
             ]
           },
           {
-            "affectedGroup": { "name": "Group 3" },
+            "affectedGroup": {
+              "name": "Group 3"
+            },
             "facetOfProsperity": "wealth",
             "outlook": "short-term",
             "possibleBenefits": [
@@ -124,7 +134,9 @@
             ]
           },
           {
-            "affectedGroup": { "name": "Group 3" },
+            "affectedGroup": {
+              "name": "Group 3"
+            },
             "facetOfProsperity": "wealth",
             "outlook": "long-term",
             "possibleBenefits": [
@@ -133,52 +145,92 @@
                 "quantitativeMagnitude": 0.0,
                 "quantitativeMetric": "normalized",
                 "signage": "zero",
-                "description": "Moderate likelihood of losing no money"
+                "description": "Moderate likelihood of losing no money",
+                "chainEffects": [
+                  {
+                    "affectedGroup": {
+                      "name": "Group 1"
+                    },
+                    "facetOfProsperity": "health",
+                    "outlook": "long-term",
+                    "possibleBenefits": [
+                      {
+                        "likelihood": 0.3,
+                        "qualitativeMagnitude": 5,
+                        "signage": "negative"
+                      },
+                      {
+                        "likelihood": 0.7,
+                        "qualitativeMagnitude": 0,
+                        "signage": "zero"
+                      }
+                    ]
+                  },
+                  {
+                    "affectedGroup": {
+                      "name": "Group 2"
+                    },
+                    "facetOfProsperity": "health",
+                    "outlook": "long-term",
+                    "possibleBenefits": [
+                      {
+                        "likelihood": 0.4,
+                        "qualitativeMagnitude": 4,
+                        "signage": "negative"
+                      },
+                      {
+                        "likelihood": 0.6,
+                        "qualitativeMagnitude": 0,
+                        "signage": "zero"
+                      }
+                    ]
+                  }
+                ]
               },
               {
                 "likelihood": 0.5,
                 "quantitativeMagnitude": 0.28,
                 "quantitativeMetric": "normalized",
                 "signage": "negative",
-                "description": "Moderate likelihood of losing $400k ($400k × 7/$10M = 0.28)"
-              }
-            ],
-            "chainEffects": [
-              {
-                "affectedGroup": { "name": "Group 1" },
-                "facetOfProsperity": "health",
-                "outlook": "long-term",
-                "possibleBenefits": [
+                "description": "Moderate likelihood of losing 400k",
+                "chainEffects": [
                   {
-                    "likelihood": 0.3,
-                    "qualitativeMagnitude": 6,
-                    "signage": "negative",
-                    "description": "Low likelihood of being very detrimental"
+                    "affectedGroup": {
+                      "name": "Group 1"
+                    },
+                    "facetOfProsperity": "health",
+                    "outlook": "long-term",
+                    "possibleBenefits": [
+                      {
+                        "likelihood": 0.3,
+                        "qualitativeMagnitude": 5,
+                        "signage": "negative"
+                      },
+                      {
+                        "likelihood": 0.7,
+                        "qualitativeMagnitude": 0,
+                        "signage": "zero"
+                      }
+                    ]
                   },
                   {
-                    "likelihood": 0.7,
-                    "qualitativeMagnitude": 1,
-                    "signage": "zero",
-                    "description": "Very high likelihood of being neutral"
-                  }
-                ]
-              },
-              {
-                "affectedGroup": { "name": "Group 2" },
-                "facetOfProsperity": "health",
-                "outlook": "long-term",
-                "possibleBenefits": [
-                  {
-                    "likelihood": 0.4,
-                    "qualitativeMagnitude": 5,
-                    "signage": "negative",
-                    "description": "Somewhat low likelihood of being somewhat detrimental"
-                  },
-                  {
-                    "likelihood": 0.6,
-                    "qualitativeMagnitude": 1,
-                    "signage": "zero",
-                    "description": "Somewhat high likelihood of being neutral"
+                    "affectedGroup": {
+                      "name": "Group 2"
+                    },
+                    "facetOfProsperity": "health",
+                    "outlook": "long-term",
+                    "possibleBenefits": [
+                      {
+                        "likelihood": 0.4,
+                        "qualitativeMagnitude": 4,
+                        "signage": "negative"
+                      },
+                      {
+                        "likelihood": 0.6,
+                        "qualitativeMagnitude": 0,
+                        "signage": "zero"
+                      }
+                    ]
                   }
                 ]
               }
@@ -191,13 +243,15 @@
         "description": "Collide with Group 4 fatally",
         "effects": [
           {
-            "affectedGroup": { "name": "Group 4" },
+            "affectedGroup": {
+              "name": "Group 4"
+            },
             "facetOfProsperity": "health",
             "outlook": "short-term",
             "possibleBenefits": [
               {
                 "likelihood": 1.0,
-                "qualitativeMagnitude": 7,
+                "qualitativeMagnitude": 6,
                 "signage": "negative",
                 "description": "Extremely high likelihood of being extremely detrimental"
               }
@@ -211,9 +265,18 @@
     "Group 1": {
       "name": "Group 1",
       "demographicMemberships": [
-        { "demographic": "Demographic 1", "count": 3 },
-        { "demographic": "Demographic 2", "count": 1 },
-        { "demographic": "Demographic 3", "count": 1 }
+        {
+          "demographic": "Demographic 1",
+          "count": 3
+        },
+        {
+          "demographic": "Demographic 2",
+          "count": 1
+        },
+        {
+          "demographic": "Demographic 3",
+          "count": 1
+        }
       ]
     },
     "Group 2": {
@@ -234,7 +297,12 @@
     },
     "Group 3": {
       "name": "Group 3",
-      "demographicMemberships": [{ "demographic": "Demographic 4", "count": 1 }]
+      "demographicMemberships": [
+        {
+          "demographic": "Demographic 4",
+          "count": 1
+        }
+      ]
     },
     "Group 4": {
       "name": "Group 4",
@@ -247,7 +315,10 @@
               "minValue": 30,
               "maxValue": 30
             },
-            { "characteristic": "Characteristic 2", "value": "2A" }
+            {
+              "characteristic": "Characteristic 2",
+              "value": "2A"
+            }
           ],
           "count": 1
         }
@@ -256,7 +327,11 @@
   },
   "ethic": {
     "name": "Worked Example Ethic",
-    "optimismBias": 0,
+    "alpha": 1,
+    "beta": 1,
+    "lambda": 1,
+    "gamma": 1,
+    "ambiguityAversion": 0.5,
     "conversionMetrics": [
       {
         "fromMetric": "USD",
@@ -283,7 +358,7 @@
           "facetOfProsperity": "health",
           "outlook": "short-term"
         },
-        "importance": 7
+        "importance": 6
       },
       {
         "id": "MP2",
@@ -293,7 +368,7 @@
           "facetOfProsperity": "health",
           "outlook": "long-term"
         },
-        "importance": 7
+        "importance": 6
       },
       {
         "id": "MP3",
@@ -303,7 +378,7 @@
           "facetOfProsperity": "health",
           "outlook": "short-term"
         },
-        "importance": 5
+        "importance": 4
       },
       {
         "id": "MP4",
@@ -313,7 +388,7 @@
           "facetOfProsperity": "health",
           "outlook": "short-term"
         },
-        "importance": 4
+        "importance": 3
       },
       {
         "id": "MP5",
@@ -323,7 +398,7 @@
           "facetOfProsperity": "wealth",
           "outlook": "short-term"
         },
-        "importance": 3
+        "importance": 2
       },
       {
         "id": "MP6",
@@ -335,12 +410,15 @@
               "minValue": 20,
               "maxValue": 40
             },
-            { "characteristic": "Characteristic 2", "value": "2A" }
+            {
+              "characteristic": "Characteristic 2",
+              "value": "2A"
+            }
           ],
           "facetOfProsperity": "health",
           "outlook": "short-term"
         },
-        "importance": 5
+        "importance": 4
       }
     ]
   },
@@ -349,86 +427,129 @@
       "name": "Demographic 1",
       "description": "Any C1, any C2; Characteristic 3 in [0, 20]",
       "numericalBands": [
-        { "characteristic": "Characteristic 3", "minValue": 0, "maxValue": 20 }
+        {
+          "characteristic": "Characteristic 3",
+          "minValue": 0,
+          "maxValue": 20
+        }
       ]
     },
     "Demographic 2": {
       "name": "Demographic 2",
       "description": "C1 = false; any C2; Characteristic 3 in [20, 40]",
       "booleanValues": [
-        { "characteristic": "Characteristic 1", "value": false }
+        {
+          "characteristic": "Characteristic 1",
+          "value": false
+        }
       ],
       "numericalBands": [
-        { "characteristic": "Characteristic 3", "minValue": 20, "maxValue": 40 }
+        {
+          "characteristic": "Characteristic 3",
+          "minValue": 20,
+          "maxValue": 40
+        }
       ]
     },
     "Demographic 3": {
       "name": "Demographic 3",
       "description": "C1 = true; any C2; Characteristic 3 in [20, 40]",
       "booleanValues": [
-        { "characteristic": "Characteristic 1", "value": true }
+        {
+          "characteristic": "Characteristic 1",
+          "value": true
+        }
       ],
       "numericalBands": [
-        { "characteristic": "Characteristic 3", "minValue": 20, "maxValue": 40 }
+        {
+          "characteristic": "Characteristic 3",
+          "minValue": 20,
+          "maxValue": 40
+        }
       ]
     },
     "Demographic 4": {
       "name": "Demographic 4",
       "description": "C1 = true; C2 = 2C; Characteristic 3 in [20, 60]",
       "booleanValues": [
-        { "characteristic": "Characteristic 1", "value": true }
+        {
+          "characteristic": "Characteristic 1",
+          "value": true
+        }
       ],
-      "stringValues": [{ "characteristic": "Characteristic 2", "value": "2C" }],
+      "stringValues": [
+        {
+          "characteristic": "Characteristic 2",
+          "value": "2C"
+        }
+      ],
       "numericalBands": [
-        { "characteristic": "Characteristic 3", "minValue": 20, "maxValue": 60 }
+        {
+          "characteristic": "Characteristic 3",
+          "minValue": 20,
+          "maxValue": 60
+        }
       ]
     }
   },
   "statedPreferabilities": [
-    { "choiceName": "Choice 1", "statedPreferability": 1 },
-    { "choiceName": "Choice 2", "statedPreferability": 5 },
-    { "choiceName": "Choice 3", "statedPreferability": 3 },
-    { "choiceName": "Choice 4", "statedPreferability": 1 }
+    {
+      "choiceName": "Choice 1",
+      "statedPreferability": 0
+    },
+    {
+      "choiceName": "Choice 2",
+      "statedPreferability": 4
+    },
+    {
+      "choiceName": "Choice 3",
+      "statedPreferability": 2
+    },
+    {
+      "choiceName": "Choice 4",
+      "statedPreferability": 0
+    }
   ],
   "expectedResults": {
-    "_note": "Values computed with exact arithmetic. The white paper used rounded intermediates and contains an arithmetic error in Choice 3 (4.28 × 0.74 was written as -2.22 instead of -3.17). Exact values: Choice 1 = -354/49, Choice 2 = -183/49, Choice 3 = -969/245 - 0.00045, Choice 4 = -5/7.",
+    "_note": "Piecewise absolute preferability (§3.8, w_unpref=0.43). All moral valences negative (V_max<0), re-anchored below neutral.",
     "moralValences": {
-      "Choice 1": -7.2245,
-      "Choice 2": -3.7347,
-      "Choice 3": -3.9556,
-      "Choice 4": -0.7143
+      "Choice 1": -6.65,
+      "Choice 2": -3.54167,
+      "Choice 3": -3.66702,
+      "Choice 4": -0.66667
     },
     "calculatedPreferabilities": {
-      "Choice 1": 1,
-      "Choice 2": 4,
-      "Choice 3": 4,
-      "Choice 4": 7
+      "Choice 1": 0,
+      "Choice 2": 1,
+      "Choice 3": 1,
+      "Choice 4": 3
     },
     "divergence": {
       "Choice 1": 0,
-      "Choice 2": 1,
-      "Choice 3": -1,
-      "Choice 4": -6
+      "Choice 2": 3,
+      "Choice 3": 1,
+      "Choice 4": -3
     },
-    "meanAbsoluteDivergence": 2.0,
+    "meanAbsoluteDivergence": 1.75,
+    "meanPrescriptiveDivergence": 0.25,
+    "totalPrescriptiveDivergence": 1.0,
+    "prescriptiveDivergenceBand": "substantial",
     "prescribedChoice": "Choice 4",
     "inferredMoralPriorities": {
-      "_note": "Minimum-norm solution (A·Aᵀ·y=b, x=Aᵀ·y) with 11 concerns and 4 choices. Three short-term demographic concerns clamp to 0 (minimum-norm distributes weight to charband and long-term concerns instead). Values rounded to 6 d.p.",
       "demographic|health|short-term|Demographic 1": 0.0,
       "demographic|health|short-term|Demographic 2": 0.0,
       "demographic|health|short-term|Demographic 3": 0.0,
-      "characteristicBand|health|short-term|num:Characteristic 3:[20..40]": 0.576668,
-      "demographic|wealth|short-term|Demographic 4": 0.00036,
-      "demographic|wealth|long-term|Demographic 4": 0.047948,
-      "demographic|health|long-term|Demographic 1": 0.264201,
-      "demographic|health|long-term|Demographic 2": 0.088067,
-      "demographic|health|long-term|Demographic 3": 0.088067,
-      "characteristicBand|health|long-term|num:Characteristic 3:[20..40]": 0.587113,
+      "characteristicBand|health|short-term|num:Characteristic 3:[20..40]": 0.588235,
+      "demographic|wealth|short-term|Demographic 4": 0.000416,
+      "demographic|wealth|long-term|Demographic 4": 0.055455,
+      "demographic|health|long-term|Demographic 1": 0.297079,
+      "demographic|health|long-term|Demographic 2": 0.099026,
+      "demographic|health|long-term|Demographic 3": 0.099026,
+      "characteristicBand|health|long-term|num:Characteristic 3:[20..40]": 0.633769,
       "characteristicBand|health|short-term|num:Characteristic 3:[30..30];str:Characteristic 2=2A": 0.0
     },
     "moralPriorityDivergenceSignalFromStatedPreferabilities": {
-      "_note": "Computed by comparing ethic.moralPriorities (purported) against inferredMoralPriorities. QualitativeMagnitude ordinals normalised by /7.",
-      "meanAbsoluteDivergence": 0.439781,
+      "meanAbsoluteDivergence": 0.425274,
       "perConcern": {
         "demographic|health|short-term|Demographic 1": {
           "purportedImportance": 1.0,
@@ -437,58 +558,58 @@
           "absoluteDivergence": 1.0
         },
         "demographic|health|short-term|Demographic 2": {
-          "purportedImportance": 0.714286,
+          "purportedImportance": 0.666667,
           "inferredImportance": 0.0,
-          "signedDivergence": 0.714286,
-          "absoluteDivergence": 0.714286
+          "signedDivergence": 0.666667,
+          "absoluteDivergence": 0.666667
         },
         "demographic|health|short-term|Demographic 3": {
-          "purportedImportance": 0.571429,
+          "purportedImportance": 0.5,
           "inferredImportance": 0.0,
-          "signedDivergence": 0.571429,
-          "absoluteDivergence": 0.571429
+          "signedDivergence": 0.5,
+          "absoluteDivergence": 0.5
         },
         "characteristicBand|health|short-term|num:Characteristic 3:[20..40]": {
           "purportedImportance": 0.0,
-          "inferredImportance": 0.576668,
-          "signedDivergence": -0.576668,
-          "absoluteDivergence": 0.576668
+          "inferredImportance": 0.588235,
+          "signedDivergence": -0.588235,
+          "absoluteDivergence": 0.588235
         },
         "demographic|wealth|short-term|Demographic 4": {
-          "purportedImportance": 0.428571,
-          "inferredImportance": 0.00036,
-          "signedDivergence": 0.428212,
-          "absoluteDivergence": 0.428212
+          "purportedImportance": 0.333333,
+          "inferredImportance": 0.000416,
+          "signedDivergence": 0.332917,
+          "absoluteDivergence": 0.332917
         },
         "demographic|wealth|long-term|Demographic 4": {
           "purportedImportance": 0.0,
-          "inferredImportance": 0.047948,
-          "signedDivergence": -0.047948,
-          "absoluteDivergence": 0.047948
+          "inferredImportance": 0.055455,
+          "signedDivergence": -0.055455,
+          "absoluteDivergence": 0.055455
         },
         "demographic|health|long-term|Demographic 1": {
           "purportedImportance": 1.0,
-          "inferredImportance": 0.264201,
-          "signedDivergence": 0.735799,
-          "absoluteDivergence": 0.735799
+          "inferredImportance": 0.297079,
+          "signedDivergence": 0.702921,
+          "absoluteDivergence": 0.702921
         },
         "demographic|health|long-term|Demographic 2": {
           "purportedImportance": 0.0,
-          "inferredImportance": 0.088067,
-          "signedDivergence": -0.088067,
-          "absoluteDivergence": 0.088067
+          "inferredImportance": 0.099026,
+          "signedDivergence": -0.099026,
+          "absoluteDivergence": 0.099026
         },
         "demographic|health|long-term|Demographic 3": {
           "purportedImportance": 0.0,
-          "inferredImportance": 0.088067,
-          "signedDivergence": -0.088067,
-          "absoluteDivergence": 0.088067
+          "inferredImportance": 0.099026,
+          "signedDivergence": -0.099026,
+          "absoluteDivergence": 0.099026
         },
         "characteristicBand|health|long-term|num:Characteristic 3:[20..40]": {
           "purportedImportance": 0.0,
-          "inferredImportance": 0.587113,
-          "signedDivergence": -0.587113,
-          "absoluteDivergence": 0.587113
+          "inferredImportance": 0.633769,
+          "signedDivergence": -0.633769,
+          "absoluteDivergence": 0.633769
         },
         "characteristicBand|health|short-term|num:Characteristic 3:[30..30];str:Characteristic 2=2A": {
           "purportedImportance": 0.0,

@@ -4,8 +4,8 @@ objectifiabilist — Python package for the Objectifiabilism metaethical framewo
 Public API (re-exported from submodules):
 
 Models (from .models):
-  QualitativeMagnitude, QualitativePreferability
-  BooleanCharacteristic, StringCharacteristic, NumericalCharacteristic
+  QualitativeMagnitude, QualitativePreferability, QualitativeDifferenceMagnitude
+  BooleanCharacteristic, StringCharacteristic, NumericalCharacteristic, ProsperityCharacteristic
   BooleanCharacteristicValue, StringCharacteristicValue, NumericalCharacteristicValueBand
   Demographic, DemographicMembership, CharacteristicBandMembership
   IndividualMember, Group
@@ -14,6 +14,7 @@ Models (from .models):
   MoralPriority, ConversionMetric, Ethic, Dilemma
   DivergenceResult, DivergenceSignal, StatedPreferability, SEJPOutput
   MoralPriorityDivergenceResult, MoralPriorityDivergenceSignal
+  PerConcernBounds, PolytopeInferenceResult, get_preferability_bounds
 
 Functions (from .functions):
   calculate_weighted_net_benefit
@@ -26,7 +27,9 @@ Functions (from .functions):
   evaluate_sejp_output
   extract_moral_concerns_from_dilemma
   infer_moral_priorities
+  infer_moral_priorities_polytope
   calculate_moral_priority_divergence_signal
+  _build_hostage_dilemma
 """
 
 from .models import (
@@ -52,17 +55,27 @@ from .models import (
     NumericalCharacteristic,
     NumericalCharacteristicPoint,
     NumericalCharacteristicValueBand,
+    OverridingDuty,
+    PREFERABILITY_BUCKET_WIDTH,
+    PREFERABILITY_ORDINAL_COUNT,
+    ProsperityCharacteristic,
     PossibleBenefit,
     PreferabilityResult,
     QualitativeMagnitude,
     QualitativePreferability,
+    QualitativeDifferenceMagnitude,
     SEJPOutput,
     StatedPreferability,
     StringCharacteristic,
     StringCharacteristicValue,
+    W_UNPREF,
+    classify_divergence_band,
+    get_preferability_bounds,
 )
 
 from .functions import (
+    _build_hostage_dilemma,
+    calculate_absolute_preferability_quantitative,
     calculate_all_moral_valences,
     calculate_divergence_signal,
     calculate_importance,
@@ -100,19 +113,28 @@ __all__ = [
     "IndividualMember",
     "MoralPriority",
     "NumericalCharacteristic",
+    "OverridingDuty",
     "NumericalCharacteristicPoint",
     "NumericalCharacteristicValueBand",
+    "ProsperityCharacteristic",
     "PossibleBenefit",
     "PreferabilityResult",
     "QualitativeMagnitude",
     "QualitativePreferability",
+    "QualitativeDifferenceMagnitude",
     "SEJPOutput",
     "MoralPriorityDivergenceResult",
     "MoralPriorityDivergenceSignal",
+    "PREFERABILITY_BUCKET_WIDTH",
+    "PREFERABILITY_ORDINAL_COUNT",
+    "W_UNPREF",
     "StatedPreferability",
     "StringCharacteristic",
     "StringCharacteristicValue",
+    "classify_divergence_band",
+    "get_preferability_bounds",
     # Functions
+    "calculate_absolute_preferability_quantitative",
     "calculate_all_moral_valences",
     "calculate_divergence_signal",
     "calculate_importance",
@@ -128,4 +150,5 @@ __all__ = [
     "get_prescribed_choice",
     "get_names_of_choices_sorted_by_decreasing_moral_valence",
     "is_action_permitted",
+    "_build_hostage_dilemma",
 ]

@@ -14,7 +14,7 @@ import {
   QualitativePreferability,
   type Dilemma,
   type Ethic,
-} from "../types";
+} from "../typescript/src/types";
 
 // ---------------------------------------------------------------------------
 // Ethic
@@ -22,7 +22,7 @@ import {
 
 export const WORKED_EXAMPLE_ETHIC: Ethic = {
   name: "Worked Example Ethic",
-  optimismBias: 0,
+  // CPT params omitted — defaults (alpha=beta=lambda=gamma=1) reproduce expected-value behaviour
   conversionMetrics: [
     {
       fromMetric: "USD",
@@ -434,46 +434,82 @@ export const WORKED_EXAMPLE_DILEMMA: Dilemma = {
               quantitativeMagnitude: 0.0,
               quantitativeMetric: "normalized",
               signage: "zero",
+              chainEffects: [
+                {
+                  affectedGroup: GROUP1,
+                  facetOfProsperity: "health",
+                  outlook: "long-term",
+                  possibleBenefits: [
+                    {
+                      likelihood: 0.3,
+                      qualitativeMagnitude: QualitativeMagnitude.VeryHigh,
+                      signage: "negative",
+                    },
+                    {
+                      likelihood: 0.7,
+                      qualitativeMagnitude: QualitativeMagnitude.Negligible,
+                      signage: "zero",
+                    },
+                  ],
+                },
+                {
+                  affectedGroup: GROUP2,
+                  facetOfProsperity: "health",
+                  outlook: "long-term",
+                  possibleBenefits: [
+                    {
+                      likelihood: 0.4,
+                      qualitativeMagnitude: QualitativeMagnitude.SomewhatHigh,
+                      signage: "negative",
+                    },
+                    {
+                      likelihood: 0.6,
+                      qualitativeMagnitude: QualitativeMagnitude.Negligible,
+                      signage: "zero",
+                    },
+                  ],
+                },
+              ],
             },
             {
               likelihood: 0.5,
               quantitativeMagnitude: 0.28,
               quantitativeMetric: "normalized",
               signage: "negative",
-            },
-          ],
-          chainEffects: [
-            {
-              affectedGroup: GROUP1,
-              facetOfProsperity: "health",
-              outlook: "long-term",
-              possibleBenefits: [
+              chainEffects: [
                 {
-                  likelihood: 0.3,
-                  qualitativeMagnitude: QualitativeMagnitude.VeryHigh,
-                  signage: "negative",
+                  affectedGroup: GROUP1,
+                  facetOfProsperity: "health",
+                  outlook: "long-term",
+                  possibleBenefits: [
+                    {
+                      likelihood: 0.3,
+                      qualitativeMagnitude: QualitativeMagnitude.VeryHigh,
+                      signage: "negative",
+                    },
+                    {
+                      likelihood: 0.7,
+                      qualitativeMagnitude: QualitativeMagnitude.Negligible,
+                      signage: "zero",
+                    },
+                  ],
                 },
                 {
-                  likelihood: 0.7,
-                  qualitativeMagnitude: QualitativeMagnitude.Negligible,
-                  signage: "zero",
-                },
-              ],
-            },
-            {
-              affectedGroup: GROUP2,
-              facetOfProsperity: "health",
-              outlook: "long-term",
-              possibleBenefits: [
-                {
-                  likelihood: 0.4,
-                  qualitativeMagnitude: QualitativeMagnitude.SomewhatHigh,
-                  signage: "negative",
-                },
-                {
-                  likelihood: 0.6,
-                  qualitativeMagnitude: QualitativeMagnitude.Negligible,
-                  signage: "zero",
+                  affectedGroup: GROUP2,
+                  facetOfProsperity: "health",
+                  outlook: "long-term",
+                  possibleBenefits: [
+                    {
+                      likelihood: 0.4,
+                      qualitativeMagnitude: QualitativeMagnitude.SomewhatHigh,
+                      signage: "negative",
+                    },
+                    {
+                      likelihood: 0.6,
+                      qualitativeMagnitude: QualitativeMagnitude.Negligible,
+                      signage: "zero",
+                    },
+                  ],
                 },
               ],
             },

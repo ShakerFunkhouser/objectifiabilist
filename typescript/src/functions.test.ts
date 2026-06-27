@@ -6,6 +6,8 @@ import {
   extractMoralConcernsFromDilemma,
   inferMoralPriorities,
   calculateMoralPriorityDivergenceSignal,
+  calculateMoralValueOfEffect,
+  isActionPermitted,
 } from "./functions";
 import {
   PossibleBenefit,
@@ -20,8 +22,11 @@ import {
   Dilemma,
   Ethic,
   MoralPriority,
+  OverridingDuty,
   StatedPreferability,
   DemographicMoralConcern,
+  Choice,
+  Signage,
 } from "./types";
 import {
   WORKED_EXAMPLE_DILEMMA,
@@ -36,10 +41,10 @@ const FIXTURE = require("../../fixtures/worked-example.json") as Record<
 
 describe("calculateWeightedNetBenefit", () => {
   it("returns 0 for empty benefits", () => {
-    expect(calculateWeightedNetBenefit([], 0)).toBe(0);
+    expect(calculateWeightedNetBenefit([])).toBe(0);
   });
 
-  it("calculates expected value with no optimism bias", () => {
+  it("calculates expected value (symmetric cancels to 0)", () => {
     const benefits: PossibleBenefit[] = [
       {
         likelihood: 0.5,
@@ -52,11 +57,11 @@ describe("calculateWeightedNetBenefit", () => {
         signage: "negative",
       },
     ];
-    // (0.5 * 4/7) + (0.5 * -4/7) = 0
-    expect(calculateWeightedNetBenefit(benefits, 0)).toBeCloseTo(0);
+    // (0.5 * 3/6) + (0.5 * -3/6) = 0
+    expect(calculateWeightedNetBenefit(benefits)).toBeCloseTo(0);
   });
 
-  it("applies optimism bias correctly", () => {
+  it("default CPT params yield standard expected value", () => {
     const benefits: PossibleBenefit[] = [
       {
         likelihood: 0.5,
@@ -69,8 +74,8 @@ describe("calculateWeightedNetBenefit", () => {
         signage: "negative",
       },
     ];
-    // With optimism bias 1, only the best (positive) counts: 1 * 4/7 = 0.571...
-    expect(calculateWeightedNetBenefit(benefits, 1)).toBeCloseTo(4 / 7);
+    // defaults alpha=beta=lambda=gamma=1 → standard EV: 0
+    expect(calculateWeightedNetBenefit(benefits, 1, 1, 1, 1)).toBeCloseTo(0);
   });
   it("single negative qualitative", () => {
     const b: PossibleBenefit = {
@@ -78,7 +83,7 @@ describe("calculateWeightedNetBenefit", () => {
       qualitativeMagnitude: QualitativeMagnitude.SomewhatHigh,
       signage: "negative",
     };
-    expect(calculateWeightedNetBenefit([b])).toBeCloseTo(-5 / 7);
+    expect(calculateWeightedNetBenefit([b])).toBeCloseTo(-4 / 6);
   });
 
   it("single positive", () => {
@@ -110,26 +115,21 @@ describe("calculateWeightedNetBenefit", () => {
       qualitativeMagnitude: QualitativeMagnitude.VeryHigh,
       signage: "negative",
     };
-    const expected = 0.8 * (-5 / 7) + 0.2 * (-6 / 7);
+    const expected = 0.8 * (-4 / 6) + 0.2 * (-5 / 6);
     expect(calculateWeightedNetBenefit([b1, b2])).toBeCloseTo(expected);
   });
 
-  it("optimism bias 1 picks best (least negative)", () => {
+  it("loss aversion (lambda=2) doubles negative magnitudes", () => {
     const b1: PossibleBenefit = {
-      likelihood: 0.5,
-      qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+      likelihood: 1.0,
+      qualitativeMagnitude: QualitativeMagnitude.Moderate,
       signage: "negative",
     };
-    const b2: PossibleBenefit = {
-      likelihood: 0.5,
-      qualitativeMagnitude: QualitativeMagnitude.Negligible,
-      signage: "negative",
-    };
-    // bias=1 → only best outcome (b2, -1/7) counts with weight 1
-    expect(calculateWeightedNetBenefit([b1, b2], 1.0)).toBeCloseTo(-1 / 7);
+    // lambda=2 → v(b) = -2 * (3/6)^1 = -1.0
+    expect(calculateWeightedNetBenefit([b1], 1, 1, 2)).toBeCloseTo(-1.0);
   });
 
-  it("optimism bias 0 equals expected value", () => {
+  it("Negligible magnitude contributes 0", () => {
     const b1: PossibleBenefit = {
       likelihood: 0.3,
       qualitativeMagnitude: QualitativeMagnitude.VeryHigh,
@@ -140,8 +140,8 @@ describe("calculateWeightedNetBenefit", () => {
       qualitativeMagnitude: QualitativeMagnitude.Negligible,
       signage: "zero",
     };
-    const ev = 0.3 * (-6 / 7);
-    expect(calculateWeightedNetBenefit([b1, b2], 0.0)).toBeCloseTo(ev);
+    // EV: 0.3 * (-5/6) + 0.7 * 0 = -0.25
+    expect(calculateWeightedNetBenefit([b1, b2])).toBeCloseTo(0.3 * (-5 / 6));
   });
 
   it("quantitative magnitude used directly", () => {
@@ -154,13 +154,13 @@ describe("calculateWeightedNetBenefit", () => {
     expect(calculateWeightedNetBenefit([b])).toBeCloseTo(-0.5);
   });
 
-  it("qualitative takes priority over quantitative absent", () => {
+  it("qualitative resolves to ordinal/6", () => {
     const b: PossibleBenefit = {
       likelihood: 1.0,
       qualitativeMagnitude: QualitativeMagnitude.Moderate,
       signage: "positive",
     };
-    expect(calculateWeightedNetBenefit([b])).toBeCloseTo(4 / 7);
+    expect(calculateWeightedNetBenefit([b])).toBeCloseTo(3 / 6);
   });
 });
 
@@ -308,15 +308,17 @@ describe("extractMoralConcernsFromDilemma", () => {
       "negative",
     );
     const rootEffect: Effect = {
-      ...simpleEffect(
-        g1,
-        "health",
-        "short-term",
-        0.8,
-        QualitativeMagnitude.VeryHigh,
-        "negative",
-      ),
-      chainEffects: [chainEffect],
+      affectedGroup: g1,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+      possibleBenefits: [
+        {
+          likelihood: 0.8,
+          qualitativeMagnitude: QualitativeMagnitude.VeryHigh,
+          signage: "negative",
+          chainEffects: [chainEffect],
+        },
+      ],
     };
     const dilemma: Dilemma = {
       name: "D",
@@ -362,7 +364,7 @@ describe("inferMoralPriorities", () => {
    */
   it("recovers exact importance for a single-concern single-choice system", () => {
     const g = demoGroup("G", D_elderly, 1);
-    // A[0][0] = wnb × importance_at_1 = (1 × 1/7) × 1 = 1/7
+    // A[0][0] = wnb × importance_at_1 = (1 × 0/6) × 1 = 0
     const effect = simpleEffect(
       g,
       "health",
@@ -375,8 +377,8 @@ describe("inferMoralPriorities", () => {
       name: "D",
       choices: [{ name: "A", effects: [effect] }],
     };
-    // With stated preferability = 4 (Neutral), solving: (1/7)^2 * x = (1/7) * 4 → x = 4 * 7 = 28 → clamped to 1
-    const result = inferMoralPriorities(dilemma, [stated("A", 4)]);
+    // With stated preferability = 3 (Neutral), contribution is 0 → importance unconstrained, clamped
+    const result = inferMoralPriorities(dilemma, [stated("A", 3)]);
     expect(result).toHaveLength(1);
     // importance clamped to [0,1]
     expect(result[0].importance).toBeGreaterThanOrEqual(0);
@@ -473,8 +475,8 @@ describe("inferMoralPriorities", () => {
       ],
     };
     const result = inferMoralPriorities(dilemma, [
-      stated("A", 1),
-      stated("B", 7),
+      stated("A", 0),
+      stated("B", 6),
     ]);
     expect(result).toHaveLength(1);
     expect(result[0].importance).toBe(0);
@@ -690,6 +692,18 @@ describe("worked-example fixture: divergence signal", () => {
     const expected = FIXTURE.expectedResults.meanAbsoluteDivergence as number;
     expect(signal.meanAbsoluteDivergence).toBeCloseTo(expected, 3);
   });
+
+  it("mean prescriptive divergence matches fixture", () => {
+    const expected = FIXTURE.expectedResults
+      .meanPrescriptiveDivergence as number;
+    expect(signal.meanPrescriptiveDivergence).toBeCloseTo(expected, 3);
+  });
+
+  it("prescriptive divergence band matches fixture", () => {
+    expect(signal.prescriptiveDivergenceBand).toBe(
+      FIXTURE.expectedResults.prescriptiveDivergenceBand,
+    );
+  });
 });
 
 describe("worked-example fixture: inferred moral priorities", () => {
@@ -808,5 +822,483 @@ describe("worked-example fixture: inferred moral priorities", () => {
     expect(result!.purportedImportance).toBeCloseTo(exp.purportedImportance, 3);
     expect(result!.inferredImportance).toBeCloseTo(exp.inferredImportance, 3);
     expect(result!.absoluteDivergence).toBeCloseTo(exp.absoluteDivergence, 3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ideal-state raw benefit and moral value (§3.5.1)
+// ---------------------------------------------------------------------------
+
+describe("ideal-state weighted net-benefit", () => {
+  function pb(
+    likelihood: number,
+    mag: QualitativeMagnitude,
+    signage: Signage = "positive",
+  ): PossibleBenefit {
+    return { likelihood, qualitativeMagnitude: mag, signage };
+  }
+
+  const baseConcern: DemographicMoralConcern = {
+    kind: "demographic",
+    demographic: { name: "TestPop" },
+    facetOfProsperity: "health",
+    outlook: "short-term",
+  };
+
+  it("uses signed magnitude if no ideal state", () => {
+    const priority: MoralPriority = {
+      moralConcern: baseConcern,
+      importance: QualitativeMagnitude.Moderate,
+    };
+    const result = calculateWeightedNetBenefit(
+      [pb(1.0, QualitativeMagnitude.Moderate)],
+      1,
+      1,
+      1,
+      1,
+      priority,
+    );
+    expect(result).toBeCloseTo(0.5); // +3/6 = +0.5
+  });
+
+  it("range mode: within bounds → raw = 1.0", () => {
+    const priority: MoralPriority = {
+      moralConcern: baseConcern,
+      importance: QualitativeMagnitude.Moderate,
+      minStatus: QualitativeMagnitude.SomewhatLow, // 2/6 = 0.333
+      maxStatus: QualitativeMagnitude.SomewhatHigh, // 4/6 = 0.667
+    };
+    const result = calculateWeightedNetBenefit(
+      [pb(0.8, QualitativeMagnitude.Moderate)],
+      1,
+      1,
+      1,
+      1,
+      priority,
+    );
+    // w(0.8) × v(1.0) = 0.8
+    expect(result).toBeCloseTo(0.8);
+  });
+
+  it("range mode: below min", () => {
+    const priority: MoralPriority = {
+      moralConcern: baseConcern,
+      importance: QualitativeMagnitude.Moderate,
+      minStatus: QualitativeMagnitude.Moderate, // 3/6 = 0.5
+      maxStatus: QualitativeMagnitude.VeryHigh, // 5/6 = 0.833
+    };
+    const result = calculateWeightedNetBenefit(
+      [pb(1.0, QualitativeMagnitude.VeryLow)],
+      1,
+      1,
+      1,
+      1,
+      priority,
+    );
+    // raw = 1 - (0.5 - 0.167)/0.5 = 0.333
+    expect(result).toBeCloseTo(1 / 3);
+  });
+
+  it("range mode: above max", () => {
+    const priority: MoralPriority = {
+      moralConcern: baseConcern,
+      importance: QualitativeMagnitude.Moderate,
+      minStatus: QualitativeMagnitude.VeryLow, // 1/6 = 0.167
+      maxStatus: QualitativeMagnitude.SomewhatLow, // 2/6 = 0.333
+    };
+    const result = calculateWeightedNetBenefit(
+      [pb(1.0, QualitativeMagnitude.ExtremelyHigh)],
+      1,
+      1,
+      1,
+      1,
+      priority,
+    );
+    // b_incoming=+6/6=1.0; raw = 1 - (1.0 - 0.333)/0.333 = -1.0
+    expect(result).toBeCloseTo(-1.0);
+  });
+
+  it("reference mode: min only", () => {
+    const priority: MoralPriority = {
+      moralConcern: baseConcern,
+      importance: QualitativeMagnitude.Moderate,
+      minStatus: QualitativeMagnitude.Moderate, // 3/6 = 0.5
+    };
+    const b: PossibleBenefit = {
+      likelihood: 1.0,
+      qualitativeMagnitude: QualitativeMagnitude.VeryLow,
+      signage: "negative",
+    };
+    const result = calculateWeightedNetBenefit([b], 1, 1, 1, 1, priority);
+    // b_ref = 0.5; raw = 1 - |0.5 - (-0.167)|/0.5 = -0.333
+    expect(result).toBeCloseTo(-1 / 3);
+  });
+
+  it("reference mode: max only", () => {
+    const priority: MoralPriority = {
+      moralConcern: baseConcern,
+      importance: QualitativeMagnitude.Moderate,
+      maxStatus: QualitativeMagnitude.VeryHigh, // 5/6 = 0.833
+    };
+    const result = calculateWeightedNetBenefit(
+      [pb(1.0, QualitativeMagnitude.Moderate)],
+      1,
+      1,
+      1,
+      1,
+      priority,
+    );
+    // b_ref = 0.833; raw = 1 - |0.833 - 0.5|/0.833 = 0.6
+    expect(result).toBeCloseTo(0.6);
+  });
+
+  it("negative incoming below min → raw negative", () => {
+    const priority: MoralPriority = {
+      moralConcern: baseConcern,
+      importance: QualitativeMagnitude.Moderate,
+      minStatus: QualitativeMagnitude.SomewhatLow, // 2/6 = 0.333
+      maxStatus: QualitativeMagnitude.SomewhatHigh, // 4/6 = 0.667
+    };
+    const b: PossibleBenefit = {
+      likelihood: 1.0,
+      qualitativeMagnitude: QualitativeMagnitude.SomewhatLow,
+      signage: "negative",
+    };
+    const result = calculateWeightedNetBenefit([b], 1, 1, 1, 1, priority);
+    // b_res = -0.333; raw = 1 - (0.333 - (-0.333))/0.333 = -1
+    expect(result).toBeCloseTo(-1.0);
+  });
+});
+
+describe("ideal-state moral value of effect", () => {
+  it("per-priority WNB with mixed ideal/signed priorities", () => {
+    const D1: Demographic = { name: "GroupA" };
+    const D2: Demographic = { name: "GroupB" };
+    const g: Group = {
+      name: "G",
+      demographicMemberships: [
+        { demographic: D1, count: 1 },
+        { demographic: D2, count: 1 },
+      ],
+    };
+    const effect: Effect = {
+      affectedGroup: g,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+      possibleBenefits: [
+        {
+          likelihood: 1.0,
+          qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+          signage: "positive",
+        },
+      ],
+    };
+    const ethic: Ethic = {
+      name: "Test Ethic",
+      moralPriorities: [
+        {
+          moralConcern: {
+            kind: "demographic",
+            demographic: D1,
+            facetOfProsperity: "health",
+            outlook: "short-term",
+          },
+          importance: QualitativeMagnitude.ExtremelyHigh, // 6/6 = 1.0
+          minStatus: QualitativeMagnitude.SomewhatHigh, // 4/6 = 0.667
+          maxStatus: QualitativeMagnitude.ExtremelyHigh, // 6/6 = 1.0
+        },
+        {
+          moralConcern: {
+            kind: "demographic",
+            demographic: D2,
+            facetOfProsperity: "health",
+            outlook: "short-term",
+          },
+          importance: QualitativeMagnitude.ExtremelyHigh, // 6/6 = 1.0
+        },
+      ],
+    };
+    const val = calculateMoralValueOfEffect(effect, ethic);
+    // Priority 1 (ideal): b_incoming=+6/6=1.0, within [0.667,1.0] → raw=1.0, WNB=1.0, M=1.0 → 1.0
+    // Priority 2 (signed): b_incoming=+6/6=1.0, WNB=1.0, M=1.0 → 1.0
+    // effect.likelihood=1.0 → total = 2.0
+    expect(val).toBeCloseTo(2.0);
+  });
+
+  it("no matching priority returns zero", () => {
+    const g: Group = {
+      name: "G",
+      demographicMemberships: [
+        { demographic: { name: "Irrelevant" }, count: 1 },
+      ],
+    };
+    const effect: Effect = {
+      affectedGroup: g,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+      possibleBenefits: [
+        {
+          likelihood: 1.0,
+          qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+          signage: "positive",
+        },
+      ],
+    };
+    const ethic: Ethic = {
+      name: "Test Ethic",
+      moralPriorities: [
+        {
+          moralConcern: {
+            kind: "demographic",
+            demographic: { name: "Other" },
+            facetOfProsperity: "wealth",
+            outlook: "long-term",
+          },
+          importance: QualitativeMagnitude.ExtremelyHigh,
+        },
+      ],
+    };
+    expect(calculateMoralValueOfEffect(effect, ethic)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Overriding duties (§3.7)
+// ---------------------------------------------------------------------------
+
+describe("isActionPermitted – overriding duties", () => {
+  const baseConcern: DemographicMoralConcern = {
+    kind: "demographic",
+    demographic: { name: "PopA" },
+    facetOfProsperity: "health",
+    outlook: "short-term",
+  };
+
+  it("no overriding duties → always permitted", () => {
+    const g: Group = {
+      name: "G",
+      demographicMemberships: [
+        { demographic: baseConcern.demographic, count: 1 },
+      ],
+    };
+    const choice: Choice = {
+      name: "A",
+      effects: [
+        {
+          affectedGroup: g,
+          facetOfProsperity: "health",
+          outlook: "short-term",
+          possibleBenefits: [
+            {
+              likelihood: 1.0,
+              qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+              signage: "negative",
+            },
+          ],
+        },
+      ],
+    };
+    const ethic: Ethic = {
+      name: "E",
+      moralPriorities: [
+        {
+          moralConcern: baseConcern,
+          importance: QualitativeMagnitude.Moderate,
+        },
+      ],
+    };
+    expect(isActionPermitted(choice, ethic)).toBe(true);
+  });
+
+  it("duty triggers: beneficiary benefits + obligated harmed → prohibited", () => {
+    const beneficiaryConcern: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: { name: "Beneficiary" },
+      facetOfProsperity: "wealth",
+      outlook: "long-term",
+    };
+    const g: Group = {
+      name: "G",
+      demographicMemberships: [
+        { demographic: { name: "Beneficiary" }, count: 1 },
+        { demographic: baseConcern.demographic, count: 1 },
+      ],
+    };
+    const choice: Choice = {
+      name: "A",
+      effects: [
+        {
+          affectedGroup: g,
+          facetOfProsperity: "wealth",
+          outlook: "long-term",
+          possibleBenefits: [
+            {
+              likelihood: 1.0,
+              qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+              signage: "positive",
+            },
+          ],
+        },
+        {
+          affectedGroup: g,
+          facetOfProsperity: "health",
+          outlook: "short-term",
+          possibleBenefits: [
+            {
+              likelihood: 1.0,
+              qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+              signage: "negative",
+            },
+          ],
+        },
+      ],
+    };
+    const duty: OverridingDuty = {
+      beneficiaryMoralConcern: beneficiaryConcern,
+      obligatoryDetrimentThreshold: QualitativeMagnitude.SomewhatHigh,
+    };
+    const ethic: Ethic = {
+      name: "E",
+      moralPriorities: [
+        {
+          moralConcern: baseConcern,
+          importance: QualitativeMagnitude.Moderate,
+          overridingDuties: [duty],
+        },
+        {
+          moralConcern: beneficiaryConcern,
+          importance: QualitativeMagnitude.Moderate,
+        },
+      ],
+    };
+    expect(isActionPermitted(choice, ethic)).toBe(false);
+  });
+
+  it("duty not triggered when beneficiary doesn't benefit", () => {
+    const beneficiaryConcern: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: { name: "Beneficiary" },
+      facetOfProsperity: "wealth",
+      outlook: "long-term",
+    };
+    const g: Group = {
+      name: "G",
+      demographicMemberships: [
+        { demographic: { name: "Beneficiary" }, count: 1 },
+        { demographic: baseConcern.demographic, count: 1 },
+      ],
+    };
+    const choice: Choice = {
+      name: "A",
+      effects: [
+        {
+          affectedGroup: g,
+          facetOfProsperity: "wealth",
+          outlook: "long-term",
+          possibleBenefits: [
+            {
+              likelihood: 1.0,
+              qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+              signage: "negative",
+            },
+          ],
+        },
+        {
+          affectedGroup: g,
+          facetOfProsperity: "health",
+          outlook: "short-term",
+          possibleBenefits: [
+            {
+              likelihood: 1.0,
+              qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+              signage: "negative",
+            },
+          ],
+        },
+      ],
+    };
+    const duty: OverridingDuty = {
+      beneficiaryMoralConcern: beneficiaryConcern,
+      obligatoryDetrimentThreshold: QualitativeMagnitude.SomewhatHigh,
+    };
+    const ethic: Ethic = {
+      name: "E",
+      moralPriorities: [
+        {
+          moralConcern: baseConcern,
+          importance: QualitativeMagnitude.Moderate,
+          overridingDuties: [duty],
+        },
+        {
+          moralConcern: beneficiaryConcern,
+          importance: QualitativeMagnitude.Moderate,
+        },
+      ],
+    };
+    expect(isActionPermitted(choice, ethic)).toBe(true);
+  });
+
+  it("beneficiary count scales down effective detriment", () => {
+    const beneficiaryConcern: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: { name: "Beneficiary" },
+      facetOfProsperity: "wealth",
+      outlook: "long-term",
+    };
+    const g: Group = {
+      name: "G",
+      demographicMemberships: [
+        { demographic: { name: "Beneficiary" }, count: 10 },
+        { demographic: baseConcern.demographic, count: 1 },
+      ],
+    };
+    const choice: Choice = {
+      name: "A",
+      effects: [
+        {
+          affectedGroup: g,
+          facetOfProsperity: "wealth",
+          outlook: "long-term",
+          possibleBenefits: [
+            {
+              likelihood: 1.0,
+              qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+              signage: "positive",
+            },
+          ],
+        },
+        {
+          affectedGroup: g,
+          facetOfProsperity: "health",
+          outlook: "short-term",
+          possibleBenefits: [
+            {
+              likelihood: 1.0,
+              qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+              signage: "negative",
+            },
+          ],
+        },
+      ],
+    };
+    const duty: OverridingDuty = {
+      beneficiaryMoralConcern: beneficiaryConcern,
+      obligatoryDetrimentThreshold: QualitativeMagnitude.SomewhatHigh,
+    };
+    const ethic: Ethic = {
+      name: "E",
+      moralPriorities: [
+        {
+          moralConcern: baseConcern,
+          importance: QualitativeMagnitude.Moderate,
+          overridingDuties: [duty],
+        },
+        {
+          moralConcern: beneficiaryConcern,
+          importance: QualitativeMagnitude.Moderate,
+        },
+      ],
+    };
+    expect(isActionPermitted(choice, ethic)).toBe(true);
   });
 });

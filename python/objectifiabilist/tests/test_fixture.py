@@ -147,12 +147,22 @@ def test_mad_matches_fixture(fixture, divergence_results):
     assert math.isclose(divergence_results.meanAbsoluteDivergence, expected, rel_tol=TOLERANCE)
 
 
+def test_mean_prescriptive_divergence_matches_fixture(fixture, divergence_results):
+    expected = fixture["expectedResults"]["meanPrescriptiveDivergence"]
+    assert math.isclose(divergence_results.meanPrescriptiveDivergence, expected, rel_tol=TOLERANCE)
+
+
+def test_prescriptive_divergence_band_matches_fixture(fixture, divergence_results):
+    expected = fixture["expectedResults"]["prescriptiveDivergenceBand"]
+    assert divergence_results.prescriptiveDivergenceBand == expected
+
+
 # ---------------------------------------------------------------------------
 # Fixture internal consistency: statedPreferabilities ordinals are valid
 # ---------------------------------------------------------------------------
 
 def test_stated_preferabilities_are_valid_ordinals(fixture):
-    valid = {1, 2, 3, 4, 5, 6, 7}
+    valid = {0, 1, 2, 3, 4, 5, 6}
     for s in fixture["statedPreferabilities"]:
         assert s["statedPreferability"] in valid, (
             f"{s['choiceName']}: invalid ordinal {s['statedPreferability']}"
@@ -222,3 +232,96 @@ def test_priority_divergence_per_concern_matches_fixture(fixture, inferred_prior
     assert math.isclose(result.purportedImportance, expected["purportedImportance"], abs_tol=1e-3)
     assert math.isclose(result.inferredImportance, expected["inferredImportance"], abs_tol=1e-3)
     assert math.isclose(result.absoluteDivergence, expected["absoluteDivergence"], abs_tol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Hostage scenario fixture tests
+# ---------------------------------------------------------------------------
+
+HOSTAGE_FIXTURE_PATH = Path(__file__).parents[3] / "fixtures" / "hostage-example.json"
+
+
+@pytest.fixture(scope="module")
+def hostage_fixture():
+    return json.loads(HOSTAGE_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def hostage_pipeline_results():
+    from objectifiabilist.functions import _build_hostage_dilemma
+    dilemma, ethic, stated = _build_hostage_dilemma()
+    valences = calculate_all_moral_valences(dilemma, ethic)
+    prefs = calculate_preferabilities(valences)
+    div = calculate_divergence_signal(stated, prefs)
+    inferred = infer_moral_priorities(dilemma, stated, method="simplified")
+    signal = calculate_moral_priority_divergence_signal(ethic.moralPriorities, inferred)
+    return valences, prefs, div, inferred, signal
+
+
+class TestHostageFixture:
+    def test_fixture_file_exists(self):
+        assert HOSTAGE_FIXTURE_PATH.exists(), f"Missing: {HOSTAGE_FIXTURE_PATH}"
+
+    def test_fixture_has_expected_results(self, hostage_fixture):
+        assert "expectedResults" in hostage_fixture
+        er = hostage_fixture["expectedResults"]
+        for key in ["moralValences", "calculatedPreferabilities", "prescribedChoice",
+                     "inferredMoralPriorities", "moralPriorityDivergenceSignalFromStatedPreferabilities"]:
+            assert key in er, f"Missing key: {key}"
+
+    def test_moral_valence_matches_fixture(self, hostage_fixture, hostage_pipeline_results):
+        valences, _, _, _, _ = hostage_pipeline_results
+        expected = hostage_fixture["expectedResults"]["moralValences"]
+        for name in expected:
+            assert math.isclose(valences[name], expected[name], abs_tol=TOLERANCE), (
+                f"{name}: computed {valences[name]}, fixture {expected[name]}"
+            )
+
+    def test_prescribed_choice_matches_fixture(self, hostage_fixture, hostage_pipeline_results):
+        valences, _, _, _, _ = hostage_pipeline_results
+        from objectifiabilist.functions import get_prescribed_choice
+        expected = hostage_fixture["expectedResults"]["prescribedChoice"]
+        # Re-derive from valences since get_prescribed_choice needs dilemma
+        prescribed = max(valences, key=valences.get)
+        assert prescribed == expected, f"prescribed: {prescribed}, fixture: {expected}"
+
+    def test_inferred_priorities_count(self, hostage_fixture, hostage_pipeline_results):
+        _, _, _, inferred, _ = hostage_pipeline_results
+        expected = hostage_fixture["expectedResults"]["inferredMoralPriorities"]
+        assert len(inferred) == len(expected), (
+            f"Count: computed {len(inferred)}, fixture {len(expected)}"
+        )
+
+    @pytest.mark.parametrize("concern_key", [
+        "demographic|health|short-term|Demographic 1",
+        "demographic|health|short-term|Demographic 3",
+        "demographic|wealth|long-term|Demographic 3",
+        "demographic|health|long-term|Demographic 1",
+    ])
+    def test_inferred_importance_matches_fixture(self, hostage_fixture, hostage_pipeline_results, concern_key):
+        _, _, _, inferred, _ = hostage_pipeline_results
+        expected_imp = hostage_fixture["expectedResults"]["inferredMoralPriorities"][concern_key]
+        result = next((p for p in inferred if _concern_key(p.moralConcern) == concern_key), None)
+        assert result is not None, f"No inferred priority for: {concern_key}"
+        assert math.isclose(float(result.importance), expected_imp, abs_tol=1e-3), (
+            f"{concern_key}: computed {result.importance}, fixture {expected_imp}"
+        )
+
+    def test_priority_divergence_mad_matches_fixture(self, hostage_fixture, hostage_pipeline_results):
+        _, _, _, _, signal = hostage_pipeline_results
+        expected = hostage_fixture["expectedResults"]["moralPriorityDivergenceSignalFromStatedPreferabilities"]["meanAbsoluteDivergence"]
+        assert math.isclose(signal.meanAbsoluteDivergence, expected, abs_tol=TOLERANCE)
+
+    @pytest.mark.parametrize("concern_key", [
+        "demographic|health|short-term|Demographic 1",
+        "demographic|health|short-term|Demographic 3",
+        "demographic|wealth|long-term|Demographic 3",
+    ])
+    def test_priority_divergence_per_concern_matches_fixture(self, hostage_fixture, hostage_pipeline_results, concern_key):
+        _, _, _, _, signal = hostage_pipeline_results
+        expected = hostage_fixture["expectedResults"]["moralPriorityDivergenceSignalFromStatedPreferabilities"]["perConcern"][concern_key]
+        result = next((r for r in signal.perConcern if _concern_key(r.moralConcern) == concern_key), None)
+        assert result is not None, f"No divergence result for: {concern_key}"
+        assert math.isclose(result.purportedImportance, expected["purportedImportance"], abs_tol=1e-3)
+        assert math.isclose(result.inferredImportance, expected["inferredImportance"], abs_tol=1e-3)
+        assert math.isclose(result.absoluteDivergence, expected["absoluteDivergence"], abs_tol=1e-3)
