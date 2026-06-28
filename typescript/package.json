@@ -1,6 +1,6 @@
 {
   "name": "objectifiabilist",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Objectifiabilist calculation functions (TypeScript port)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,6 +11,8 @@
     "dist/functions.d.ts",
     "dist/types.js",
     "dist/types.d.ts",
+    "dist/polytope.js",
+    "dist/polytope.d.ts",
     "README.md",
     "LICENSE"
   ],
