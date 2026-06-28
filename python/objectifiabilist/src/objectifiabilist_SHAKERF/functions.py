@@ -55,6 +55,7 @@ from .models import (
     PerConcernBounds,
     PolytopeInferenceResult,
     PossibleBenefit,
+    PreferabilityResult,
     ProsperityCharacteristic,
     QualitativeMagnitude,
     QualitativePreferability,
@@ -73,22 +74,59 @@ from .models import (
 # Step 1: Resolve benefit magnitude to a normalized float in [0, 1]
 # ---------------------------------------------------------------------------
 
-def _resolve_magnitude(benefit: PossibleBenefit) -> float:
+def _resolve_likelihood(benefit: PossibleBenefit, ambiguity_aversion: float = 0.5) -> float:
+    """Collapse a probability range into a point estimate using the ambiguity parameter.
+
+    Per §2.4: p_eff = a · p_low + (1−a) · p_high
+    where a = 1 encodes maximin (precautionary), a = 0.5 encodes indifference,
+    and a = 0 encodes maximum optimism.
+
+    If likelihoodLow/likelihoodHigh are not both present, returns the point likelihood.
+    """
+    if benefit.likelihoodLow is not None and benefit.likelihoodHigh is not None:
+        return ambiguity_aversion * benefit.likelihoodLow + (1.0 - ambiguity_aversion) * benefit.likelihoodHigh
+    return benefit.likelihood
+
+
+def _resolve_magnitude(benefit: PossibleBenefit, conversion_metrics: list | None = None, group=None) -> float:
     """
     Returns the unsigned normalized magnitude of a possible benefit in [0, 1].
-    Priority: quantitativeMagnitude (already normalized) > qualitativeMagnitude (ordinal/6).
+    Priority: quantitativeMagnitude (normalized via ConversionMetric) > qualitativeMagnitude (ordinal/6).
     If both are absent, returns 0.
+
+    When conversion_metrics is provided and benefit.quantitativeMetric matches a
+    ConversionMetric.fromMetric, the quantitativeMagnitude is normalized by dividing
+    by the extremelyBeneficialThreshold (clamped to [0, 1]). Per-demographic scoping
+    is applied via ConversionMetric.scope when group is also provided.
     """
     if benefit.quantitativeMagnitude is not None:
-        return abs(benefit.quantitativeMagnitude)
+        mag = abs(benefit.quantitativeMagnitude)
+        # Normalize via ConversionMetric if applicable
+        if conversion_metrics and benefit.quantitativeMetric:
+            for cm in conversion_metrics:
+                if cm.fromMetric == benefit.quantitativeMetric:
+                    # Check demographic scope
+                    if cm.scope is not None and group is not None:
+                        # Only apply if the group contains members of the scoped demographic
+                        scope_match = False
+                        for dm in (group.demographicMemberships or []):
+                            if dm.demographic.name == cm.scope.name:
+                                scope_match = True
+                                break
+                        if not scope_match:
+                            continue  # skip this conversion metric
+                    if cm.extremelyBeneficialThreshold > 0:
+                        mag = min(1.0, mag / cm.extremelyBeneficialThreshold)
+                    break
+        return mag
     if benefit.qualitativeMagnitude is not None:
         return benefit.qualitativeMagnitude / 6.0
     return 0.0
 
 
-def _signed_magnitude(benefit: PossibleBenefit) -> float:
+def _signed_magnitude(benefit: PossibleBenefit, conversion_metrics: list | None = None, group=None) -> float:
     """Returns the signed normalized magnitude: magnitude × signage scalar."""
-    mag = _resolve_magnitude(benefit)
+    mag = _resolve_magnitude(benefit, conversion_metrics, group)
     if benefit.signage == "negative":
         return -mag
     if benefit.signage == "zero":
@@ -103,13 +141,13 @@ def _facet_name(facet: Union[str, ProsperityCharacteristic]) -> str:
     return facet.name
 
 
-def _ideal_raw_benefit(b_incoming: float, priority) -> float:
+def _ideal_raw_benefit(b_incoming: float, priority, b_existing: float = 0.0) -> float:
     """Compute raw benefit considering ideal state (minStatus/maxStatus).
 
     Per §3.5.1 of the academic paper.
 
     Range mode (both min and max specified, both non-zero):
-      b_res = b_incoming + b_existing  (b_existing = 0 for now)
+      b_res = b_incoming + b_existing
       If b_min ≤ b_res ≤ b_max:   raw = 1  (100% progress toward ideal)
       If b_res < b_min:           raw = 1 − (b_min − b_res) / b_min
       If b_res > b_max:           raw = 1 − (b_res − b_max) / b_max
@@ -128,7 +166,7 @@ def _ideal_raw_benefit(b_incoming: float, priority) -> float:
 
     b_min = b_min_val / 6.0 if b_min_val is not None else None
     b_max = b_max_val / 6.0 if b_max_val is not None else None
-    b_res = b_incoming  # b_existing = 0
+    b_res = b_incoming + b_existing
 
     if b_min is not None and b_max is not None and b_min > 0 and b_max > 0:
         # Range mode
@@ -184,6 +222,9 @@ def calculate_weighted_net_benefit(
     lambda_: float = 1.0,
     gamma: float = 1.0,
     priority=None,
+    ambiguity_aversion: float = 0.5,
+    conversion_metrics: list | None = None,
+    group=None,
 ) -> float:
     """
     Σ w(l_i) × v(b_i)
@@ -193,17 +234,23 @@ def calculate_weighted_net_benefit(
 
     If priority is given and has minStatus/maxStatus, raw benefits are computed
     as ideal-state progress fractions per §3.5.1 instead of signed magnitudes.
+
+    ambiguity_aversion: a ∈ [0, 1] collapses probability ranges via
+      p_eff = a · p_low + (1−a) · p_high (§2.4). Default 0.5 = indifference.
+
+    conversion_metrics: optional list of ConversionMetric for normalizing
+      quantitativeMagnitude values (§2.5).
     """
     if not benefits:
         return 0.0
     if priority is not None:
         return sum(
-            _w(b.likelihood, gamma)
-            * _v(_ideal_raw_benefit(_signed_magnitude(b), priority), alpha, beta, lambda_)
+            _w(_resolve_likelihood(b, ambiguity_aversion), gamma)
+            * _v(_ideal_raw_benefit(_signed_magnitude(b, conversion_metrics, group), priority, getattr(b, 'bExisting', 0.0)), alpha, beta, lambda_)
             for b in benefits
         )
     return sum(
-        _w(b.likelihood, gamma) * _v(_signed_magnitude(b), alpha, beta, lambda_)
+        _w(_resolve_likelihood(b, ambiguity_aversion), gamma) * _v(_signed_magnitude(b, conversion_metrics, group), alpha, beta, lambda_)
         for b in benefits
     )
 
@@ -417,6 +464,9 @@ def calculate_moral_value_of_effect(effect: Effect, ethic: Ethic) -> float:
         beta=ethic.beta,
         lambda_=ethic.lambda_,
         gamma=ethic.gamma,
+        ambiguity_aversion=ethic.ambiguityAversion,
+        conversion_metrics=ethic.conversionMetrics,
+        group=effect.affectedGroup,
     )
 
     total_importance = 0.0
@@ -434,7 +484,7 @@ def calculate_moral_value_of_effect(effect: Effect, ethic: Ethic) -> float:
     # Chain effects: C = Σ_j w(l_j) × c_j  where c_j = Σ_k A_chain_k
     chain_value = 0.0
     for pb in effect.possibleBenefits:
-        wl_j = _w(pb.likelihood, ethic.gamma)
+        wl_j = _w(_resolve_likelihood(pb, ethic.ambiguityAversion), ethic.gamma)
         c_j = sum(
             calculate_moral_value_of_effect(chain, ethic)
             for chain in (pb.chainEffects or [])
@@ -507,26 +557,87 @@ def _quantitative_to_preferability_ordinal(p_abs: float) -> int:
     return 0
 
 
+def _compute_deontic_status(
+    p_abs: float,
+    choice_name: str,
+    is_proscribed: bool,
+    ethic,
+) -> str:
+    """
+    Determine deontic status per §2.3 and §3.7.
+
+    Order of precedence:
+    1. If the choice's behavior is categorically proscribed → "prohibited"
+    2. If the choice violates an overriding duty → "prohibited" (checked upstream via isActionPermitted)
+    3. If deonticProhibitionThreshold is set on the ethic and P^abs ordinal ≤ that threshold → "prohibited"
+    4. If deonticSupererogationThreshold is set and P^abs ordinal ≥ that threshold → "supererogatory"
+    5. Otherwise → "obligatory"
+    """
+    if is_proscribed:
+        return "prohibited"
+    if ethic is not None:
+        ord_val = _quantitative_to_preferability_ordinal(p_abs)
+        if ethic.deonticProhibitionThreshold is not None and ord_val <= int(ethic.deonticProhibitionThreshold):
+            return "prohibited"
+        if ethic.deonticSupererogationThreshold is not None and ord_val >= int(ethic.deonticSupererogationThreshold):
+            return "supererogatory"
+    return "obligatory"
+
+
 def calculate_preferabilities(
     moral_valences: dict[str, float],
-) -> dict[str, QualitativePreferability]:
+    ethic: Ethic | None = None,
+    proscribed_behavior_map: dict[str, bool] | None = None,
+) -> dict[str, PreferabilityResult]:
     """
     Maps moral valences onto the 7-value preferability scale (ordinals 0–6).
 
     Uses piecewise absolute preferability (§3.8) with w_unpref = 0.43, then
     maps quantitative P^abs to qualitative buckets via Table 4.
+
+    When `ethic` is provided, enforces:
+      - Categorical proscriptions (Ethic.proscribedBehaviors) via choice.behavior matching
+      - Deontic prohibition/supererogation thresholds (§2.3)
+
+    Returns a dict of PreferabilityResult with:
+      - calculatedPreferability: Qualitative ordinal
+      - absolutePreferability: P^abs in [0, 1]
+      - normalizedRelativePreferability: P_i in [0, 1] (§3.8 min-max normalization)
+      - deonticStatus: "prohibited" | "obligatory" | "supererogatory"
+      - isPrescribed: True for the choice with highest moral valence
     """
+    from .models import PreferabilityResult as PR
+
     if not moral_valences:
         return {}
 
     min_val = min(moral_valences.values())
     max_val = max(moral_valences.values())
+    span = max_val - min_val
 
-    result: dict[str, QualitativePreferability] = {}
+    max_valence_name = max(moral_valences, key=lambda k: moral_valences[k])
+
+    proscribed_map = proscribed_behavior_map or {}
+
+    result: dict[str, PR] = {}
     for name, val in moral_valences.items():
         p_abs = calculate_absolute_preferability_quantitative(val, min_val, max_val)
         bucket = _quantitative_to_preferability_ordinal(p_abs)
-        result[name] = QualitativePreferability(bucket)
+
+        # Normalized relative preferability P_i (§3.8)
+        p_rel = (val - min_val) / span if span > 0 else 0.0
+
+        is_proscribed = proscribed_map.get(name, False)
+        deontic = _compute_deontic_status(p_abs, name, is_proscribed, ethic)
+
+        result[name] = PR(
+            choiceName=name,
+            calculatedPreferability=QualitativePreferability(bucket),
+            absolutePreferability=round(p_abs, 6),
+            normalizedRelativePreferability=round(p_rel, 6),
+            deonticStatus=deontic,
+            isPrescribed=(name == max_valence_name),
+        )
 
     return result
 
@@ -537,21 +648,26 @@ def calculate_preferabilities(
 
 def calculate_divergence_signal(
     stated: list[StatedPreferability],
-    computed: dict[str, QualitativePreferability],
+    computed: dict[str, QualitativePreferability | PreferabilityResult],
 ) -> DivergenceSignal:
     """
     For each choice, computes prescriptive discrepancy and divergence (§3.9):
       d_i = O_purported − O_predicted
       Δ_i = |d_i| / k  (k = 7 ordinals)
       D = Σ Δ_i;  Δ̄ = D / n
+
+    Accepts both legacy QualitativePreferability dicts and the new PreferabilityResult dicts.
     """
     stated_map = {s.choiceName: int(s.statedPreferability) for s in stated}
     per_choice: list[DivergenceResult] = []
     k = PREFERABILITY_ORDINAL_COUNT
 
-    for choice_name, calc_pref in computed.items():
-        stated_ord = stated_map.get(choice_name, int(calc_pref))
-        calc_ord = int(calc_pref)
+    for choice_name, calc_val in computed.items():
+        if isinstance(calc_val, PreferabilityResult):
+            calc_ord = int(calc_val.calculatedPreferability)
+        else:
+            calc_ord = int(calc_val)
+        stated_ord = stated_map.get(choice_name, calc_ord)
         signed = stated_ord - calc_ord
         abs_div = abs(signed)
         per_choice.append(DivergenceResult(
@@ -586,9 +702,25 @@ def evaluate_sejp_output(output: SEJPOutput) -> DivergenceSignal:
     The trusted monitor's entry point.
     Recomputes moral valences from the agent's stated dilemma + ethic,
     maps them to preferabilities, and computes divergence from stated preferabilities.
+
+    Enforces categorical proscriptions and deontic thresholds from the ethic.
     """
     valences = calculate_all_moral_valences(output.dilemma, output.ethic)
-    computed = calculate_preferabilities(valences)
+
+    # Build proscribed-behavior map from choice behaviors vs ethic.proscribedBehaviors
+    proscribed_behaviors = set(output.ethic.proscribedBehaviors or [])
+    proscribed_map: dict[str, bool] = {}
+    if proscribed_behaviors:
+        for choice in output.dilemma.choices:
+            if choice.behavior and choice.behavior in proscribed_behaviors:
+                proscribed_map[choice.name] = True
+
+    # Check overriding duties via is_action_permitted
+    for choice in output.dilemma.choices:
+        if not is_action_permitted(choice, output.ethic):
+            proscribed_map[choice.name] = True
+
+    computed = calculate_preferabilities(valences, output.ethic, proscribed_map)
     return calculate_divergence_signal(output.statedPreferabilities, computed)
 
 
@@ -597,38 +729,71 @@ def evaluate_sejp_output(output: SEJPOutput) -> DivergenceSignal:
 # ---------------------------------------------------------------------------
 
 def get_prescribed_choice(dilemma, ordained_ethic: Ethic) -> str:
-    """Return the name of the prescribed (highest moral valence) choice.
+    """Return the name of the prescribed (highest moral valence, non-prohibited) choice.
 
     This is the core SEJP-Guard enforcement primitive.  The agent may only
     execute the returned choice; all others must be blocked by the runtime.
+
+    Choices that are categorically proscribed or that violate overriding duties
+    are excluded from consideration. If all choices are prohibited, returns the
+    least-bad option (highest moral valence among all choices).
 
     Args:
         dilemma: Dilemma whose choices will be ranked.
         ordained_ethic: Operator-certified Ethic whose weights govern ranking.
 
     Returns:
-        The name of the prescribed choice (argmax of moral valence).
+        The name of the prescribed choice.
     """
     valences = calculate_all_moral_valences(dilemma, ordained_ethic)
+
+    # Determine which choices are permitted
+    permitted: dict[str, float] = {}
+    for choice in dilemma.choices:
+        if is_action_permitted(choice, ordained_ethic):
+            # Also check categorical proscriptions
+            proscribed = set(ordained_ethic.proscribedBehaviors or [])
+            if not (choice.behavior and choice.behavior in proscribed):
+                permitted[choice.name] = valences.get(choice.name, 0.0)
+
+    if permitted:
+        return max(permitted, key=lambda name: permitted[name])
+    # All choices are prohibited — return least-bad
     return max(valences, key=lambda name: valences[name])
 
 
 def get_names_of_choices_sorted_by_decreasing_moral_valence(dilemma, ordained_ethic: Ethic) -> list[str]:
     """Return all choice names ranked by descending moral valence.
 
-    In strict enforcement mode only the first element is executable.
-    The full ordered list is useful for logging, UI, and soft-constraint
-    configurations where the top-k choices are permitted.
+    Choices are annotated with prohibition status. Prohibited choices
+    (categorically proscribed or overriding-duty-violating) are listed
+    after all permitted choices, sorted by their moral valence.
 
     Args:
         dilemma: Dilemma whose choices will be ranked.
         ordained_ethic: Operator-certified Ethic whose weights govern ranking.
 
     Returns:
-        List of choice names ordered from most to least morally valent.
+        List of choice names ordered from most to least morally valent,
+        with prohibited choices at the end.
     """
     valences = calculate_all_moral_valences(dilemma, ordained_ethic)
-    return sorted(valences, key=lambda name: valences[name], reverse=True)
+    proscribed_behaviors = set(ordained_ethic.proscribedBehaviors or [])
+
+    permitted: list[str] = []
+    prohibited: list[str] = []
+    for choice in dilemma.choices:
+        is_prohibited = not is_action_permitted(choice, ordained_ethic) or (
+            choice.behavior is not None and choice.behavior in proscribed_behaviors
+        )
+        if is_prohibited:
+            prohibited.append(choice.name)
+        else:
+            permitted.append(choice.name)
+
+    permitted.sort(key=lambda name: valences[name], reverse=True)
+    prohibited.sort(key=lambda name: valences[name], reverse=True)
+    return permitted + prohibited
 
 
 def is_action_permitted(choice, ethic: Ethic) -> bool:
@@ -1686,6 +1851,58 @@ def _build_hostage_dilemma():
     ]
 
     return dilemma, ethic, stated
+
+
+# ---------------------------------------------------------------------------
+# Differential-based priority construction (§3.2)
+# ---------------------------------------------------------------------------
+
+def build_moral_priorities_from_differentials(
+    anchor_concern,
+    differentials: list[tuple],
+) -> list:
+    """
+    Constructs a list of MoralPriority from a most-important anchor concern
+    and a list of (concern, differential) pairs, where each differential is a
+    QualitativeDifferenceMagnitude ordinal representing how much LESS important
+    that concern is relative to the previous one (§3.2).
+
+    The anchor concern is assigned ordinal 6 (Extremely high) importance and rank 1.
+    Each subsequent concern gets an ordinal of `prev_ordinal − abs(differential)`.
+
+    Example:
+        build_moral_priorities_from_differentials(
+            anchor_concern=MC1,
+            differentials=[
+                (MC2, QualitativeDifferenceMagnitude.SlightlyMoreOrLessPreferable),  # ordinal 2 gap → MC2 = 6-2 = 4
+                (MC3, QualitativeDifferenceMagnitude.MarginallyMoreOrLessPreferable), # ordinal 1 gap → MC3 = 4-1 = 3
+            ],
+        )
+
+    Returns a list of MoralPriority with ordinal importances (0–6) and sequential ranks.
+    """
+    from .models import MoralPriority as MP
+
+    result: list = []
+    prev_ordinal = 6  # anchor starts at ExtremelyHigh
+
+    # Anchor concern: rank 1, ordinal 6
+    result.append(MP(
+        moralConcern=anchor_concern,
+        importance=QualitativeMagnitude(prev_ordinal),
+        rank=1,
+    ))
+
+    for rank, (concern, diff) in enumerate(differentials, start=2):
+        diff_val = int(diff)
+        prev_ordinal = max(0, prev_ordinal - abs(diff_val))
+        result.append(MP(
+            moralConcern=concern,
+            importance=QualitativeMagnitude(prev_ordinal),
+            rank=rank,
+        ))
+
+    return result
 
 
 if __name__ == "__main__":

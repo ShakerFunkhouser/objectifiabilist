@@ -18,6 +18,8 @@ import pytest
 
 from objectifiabilist.functions import (
     _charband_satisfies_concern_band,
+    _resolve_likelihood,
+    build_moral_priorities_from_differentials,
     calculate_weighted_net_benefit,
     calculate_importance,
     calculate_moral_value_of_effect,
@@ -36,6 +38,8 @@ from objectifiabilist.models import (
     BooleanCharacteristicValue,
     CharacteristicBandMembership,
     CharacteristicBandMoralConcern,
+    Choice,
+    ConversionMetric,
     Demographic,
     DemographicMembership,
     DemographicMoralConcern,
@@ -51,6 +55,7 @@ from objectifiabilist.models import (
     OverridingDuty,
     PolytopeInferenceResult,
     PossibleBenefit,
+    QualitativeDifferenceMagnitude as QDM,
     QualitativeMagnitude as QM,
     QualitativePreferability as QP,
     StatedPreferability,
@@ -303,22 +308,22 @@ class TestCalculatePreferabilities:
     def test_single_choice_maps_to_extremely_unpreferable(self):
         # Single choice with V_max ≤ 0 and V_min = V_max → P^abs = 0
         result = calculate_preferabilities({"A": -1.0})
-        assert result["A"] == QP.ExtremelyUnpreferable
+        assert result["A"].calculatedPreferability == QP.ExtremelyUnpreferable
 
     def test_all_equal_positive_maps_to_extremely_preferable(self):
         # All equal positive: p_abs = val/max_val = 1.0 → ExtremelyPreferable
         result = calculate_preferabilities({"A": 5.0, "B": 5.0, "C": 5.0})
-        assert all(v == QP.ExtremelyPreferable for v in result.values())
+        assert all(v.calculatedPreferability == QP.ExtremelyPreferable for v in result.values())
 
     def test_mixed_sign_piecewise_preferability(self):
         result = calculate_preferabilities({"worst": -10.0, "best": 10.0})
-        assert result["worst"] == QP.Neutral  # (-10/-10)*0.43 = 0.43
-        assert result["best"] == QP.ExtremelyPreferable  # 10/10 = 1.0
+        assert result["worst"].calculatedPreferability == QP.Neutral  # (-10/-10)*0.43 = 0.43
+        assert result["best"].calculatedPreferability == QP.ExtremelyPreferable  # 10/10 = 1.0
 
     def test_buckets_are_monotone(self):
         valences = {"A": 0.0, "B": 2.5, "C": 5.0, "D": 7.5, "E": 10.0}
         result = calculate_preferabilities(valences)
-        ordered = [result[k].value for k in sorted(valences, key=valences.__getitem__)]
+        ordered = [result[k].calculatedPreferability.value for k in sorted(valences, key=valences.__getitem__)]
         assert ordered == sorted(ordered)
 
     def test_worked_example_preferabilities(self):
@@ -330,10 +335,10 @@ class TestCalculatePreferabilities:
             "Choice 4": -2/3,
         }
         result = calculate_preferabilities(valences)
-        assert result["Choice 1"] == QP.ExtremelyUnpreferable   # 0
-        assert result["Choice 2"] == QP.VeryUnpreferable       # 1
-        assert result["Choice 3"] == QP.VeryUnpreferable       # 1
-        assert result["Choice 4"] == QP.Neutral                # 3
+        assert result["Choice 1"].calculatedPreferability == QP.ExtremelyUnpreferable   # 0
+        assert result["Choice 2"].calculatedPreferability == QP.VeryUnpreferable       # 1
+        assert result["Choice 3"].calculatedPreferability == QP.VeryUnpreferable       # 1
+        assert result["Choice 4"].calculatedPreferability == QP.Neutral                # 3
 
 
 # ---------------------------------------------------------------------------
@@ -421,10 +426,10 @@ class TestWorkedExample:
 
     def test_preferabilities(self, results):
         _, prefs, _ = results
-        assert prefs["Choice 1"] == QP.ExtremelyUnpreferable  # 0
-        assert prefs["Choice 2"] == QP.VeryUnpreferable       # 1
-        assert prefs["Choice 3"] == QP.VeryUnpreferable       # 1
-        assert prefs["Choice 4"] == QP.Neutral                # 3
+        assert prefs["Choice 1"].calculatedPreferability == QP.ExtremelyUnpreferable  # 0
+        assert prefs["Choice 2"].calculatedPreferability == QP.VeryUnpreferable       # 1
+        assert prefs["Choice 3"].calculatedPreferability == QP.VeryUnpreferable       # 1
+        assert prefs["Choice 4"].calculatedPreferability == QP.Neutral                # 3
 
     def test_divergence_choice1(self, results):
         _, _, signal = results
@@ -1055,3 +1060,199 @@ class TestOverridingDuties:
         ])
         # beneficiary_count=10; b_eff = 1.0/10 = 0.1 < 0.667 → permitted
         assert is_action_permitted(choice, ethic) is True
+
+
+# ---------------------------------------------------------------------------
+# 10. Ambiguity aversion — probability range collapse (§2.4)
+# ---------------------------------------------------------------------------
+
+class TestResolveLikelihood:
+    """Tests for _resolve_likelihood: collapsing [p_low, p_high] via ambiguityAversion."""
+
+    def _pb(self, likelihood, low=None, high=None):
+        return PossibleBenefit(
+            likelihood=likelihood,
+            likelihoodLow=low,
+            likelihoodHigh=high,
+            signage="positive",
+            qualitativeMagnitude=QM.Moderate,
+        )
+
+    def test_point_likelihood_unchanged_by_ambiguity(self):
+        """When no range is specified, the point likelihood passes through."""
+        pb = self._pb(0.7)
+        assert _resolve_likelihood(pb, 0.0) == 0.7
+        assert _resolve_likelihood(pb, 0.5) == 0.7
+        assert _resolve_likelihood(pb, 1.0) == 0.7
+
+    def test_maximin_collapses_to_low(self):
+        """a = 1 (maximin): p_eff = 1·p_low + 0·p_high = p_low."""
+        pb = self._pb(0.0, low=0.3, high=0.9)
+        assert math.isclose(_resolve_likelihood(pb, 1.0), 0.3)
+
+    def test_maximum_optimism_collapses_to_high(self):
+        """a = 0 (max optimism): p_eff = 0·p_low + 1·p_high = p_high."""
+        pb = self._pb(0.0, low=0.3, high=0.9)
+        assert math.isclose(_resolve_likelihood(pb, 0.0), 0.9)
+
+    def test_indifference_is_midpoint(self):
+        """a = 0.5: p_eff = 0.5·p_low + 0.5·p_high = midpoint."""
+        pb = self._pb(0.0, low=0.2, high=0.8)
+        assert math.isclose(_resolve_likelihood(pb, 0.5), 0.5)
+
+    def test_range_applied_in_weighted_net_benefit(self):
+        """Probability range collapse flows through calculate_weighted_net_benefit."""
+        pb = PossibleBenefit(
+            likelihood=0.0,  # ignored when range present
+            likelihoodLow=0.0,
+            likelihoodHigh=1.0,
+            qualitativeMagnitude=QM.ExtremelyHigh,
+            signage="positive",
+        )
+        # a=0.5 → p_eff = 0.5; WNB = 0.5 × 1.0 = 0.5
+        result = calculate_weighted_net_benefit([pb], ambiguity_aversion=0.5)
+        assert math.isclose(result, 0.5)
+        # a=1.0 → p_eff = 0.0; WNB = 0.0
+        result = calculate_weighted_net_benefit([pb], ambiguity_aversion=1.0)
+        assert math.isclose(result, 0.0)
+
+    def test_missing_one_bound_falls_back_to_point(self):
+        """If only one bound is set, the point likelihood is used."""
+        pb = self._pb(0.5, low=0.2)  # no likelihoodHigh
+        assert _resolve_likelihood(pb, 1.0) == 0.5
+
+
+# ---------------------------------------------------------------------------
+# 11. Conversion metric normalization (§2.5)
+# ---------------------------------------------------------------------------
+
+class TestConversionMetricNormalization:
+    """Tests for quantitativeMagnitude normalization via ConversionMetric."""
+
+    def test_quantitative_normalized_by_threshold(self):
+        """quantitativeMagnitude divided by extremelyBeneficialThreshold."""
+        cm = ConversionMetric(fromMetric="USD", extremelyBeneficialThreshold=100_000)
+        pb = PossibleBenefit(
+            likelihood=1.0,
+            quantitativeMagnitude=50_000,
+            quantitativeMetric="USD",
+            signage="positive",
+        )
+        # 50000 / 100000 = 0.5
+        result = calculate_weighted_net_benefit([pb], conversion_metrics=[cm])
+        assert math.isclose(result, 0.5)
+
+    def test_quantitative_clamped_at_one(self):
+        """Magnitudes exceeding the threshold are clamped to 1.0."""
+        cm = ConversionMetric(fromMetric="USD", extremelyBeneficialThreshold=1000)
+        pb = PossibleBenefit(
+            likelihood=1.0,
+            quantitativeMagnitude=5000,
+            quantitativeMetric="USD",
+            signage="positive",
+        )
+        result = calculate_weighted_net_benefit([pb], conversion_metrics=[cm])
+        assert math.isclose(result, 1.0)
+
+    def test_demographic_scope_respected(self):
+        """Conversion only applies when the group matches the metric's scope."""
+        D_match = Demographic(name="Billionaires")
+        D_other = Demographic(name="Average")
+        cm = ConversionMetric(
+            fromMetric="USD",
+            extremelyBeneficialThreshold=10_000_000,
+            scope=D_match,
+        )
+        pb = PossibleBenefit(
+            likelihood=1.0,
+            quantitativeMagnitude=1_000_000,
+            quantitativeMetric="USD",
+            signage="positive",
+        )
+        # Group matches scope → normalization applies: 1M/10M = 0.1
+        g_match = Group(name="G", demographicMemberships=[DemographicMembership(demographic=D_match, count=1)])
+        result = calculate_weighted_net_benefit([pb], conversion_metrics=[cm], group=g_match)
+        assert math.isclose(result, 0.1)
+
+        # Group does NOT match scope → normalization skipped: abs(1M) = 1_000_000
+        g_other = Group(name="G", demographicMemberships=[DemographicMembership(demographic=D_other, count=1)])
+        result = calculate_weighted_net_benefit([pb], conversion_metrics=[cm], group=g_other)
+        assert math.isclose(result, 1_000_000)
+
+    def test_qualitative_fallback_ignores_conversion(self):
+        """Conversion metrics don't affect qualitative magnitudes."""
+        cm = ConversionMetric(fromMetric="USD", extremelyBeneficialThreshold=100)
+        pb = PossibleBenefit(
+            likelihood=1.0,
+            qualitativeMagnitude=QM.ExtremelyHigh,
+            signage="positive",
+        )
+        result = calculate_weighted_net_benefit([pb], conversion_metrics=[cm])
+        assert math.isclose(result, 1.0)  # ordinal 6 / 6
+
+
+# ---------------------------------------------------------------------------
+# 12. Differential-based priority construction (§3.2)
+# ---------------------------------------------------------------------------
+
+class TestBuildMoralPrioritiesFromDifferentials:
+    """Tests for build_moral_priorities_from_differentials."""
+
+    def test_anchor_gets_rank1_extremely_high(self):
+        """The anchor concern is assigned rank 1 and ordinal 6."""
+        D = Demographic(name="Children")
+        anchor = DemographicMoralConcern(demographic=D, facetOfProsperity="health", outlook="short-term")
+        result = build_moral_priorities_from_differentials(anchor, [])
+        assert len(result) == 1
+        assert result[0].rank == 1
+        assert result[0].importance == QM.ExtremelyHigh  # ordinal 6
+
+    def test_single_differential_reduces_ordinal(self):
+        """One differential of gap 2: anchor=6 → second=4."""
+        D1 = Demographic(name="A")
+        D2 = Demographic(name="B")
+        anchor = DemographicMoralConcern(demographic=D1, facetOfProsperity="health", outlook="short-term")
+        concern2 = DemographicMoralConcern(demographic=D2, facetOfProsperity="health", outlook="short-term")
+        result = build_moral_priorities_from_differentials(anchor, [(concern2, QDM.SlightlyMoreOrLessPreferable)])  # gap 2
+        assert len(result) == 2
+        assert result[0].rank == 1
+        assert result[0].importance == QM.ExtremelyHigh  # 6
+        assert result[1].rank == 2
+        assert result[1].importance == QM.SomewhatHigh  # 6 - 2 = 4
+
+    def test_multiple_differentials_accumulate(self):
+        """Three concerns: 6 → 4 → 3."""
+        D1 = Demographic(name="A")
+        D2 = Demographic(name="B")
+        D3 = Demographic(name="C")
+        anchor = DemographicMoralConcern(demographic=D1, facetOfProsperity="health", outlook="short-term")
+        c2 = DemographicMoralConcern(demographic=D2, facetOfProsperity="health", outlook="short-term")
+        c3 = DemographicMoralConcern(demographic=D3, facetOfProsperity="health", outlook="short-term")
+        result = build_moral_priorities_from_differentials(anchor, [
+            (c2, QDM.SlightlyMoreOrLessPreferable),       # gap 2 → 4
+            (c3, QDM.MarginallyMoreOrLessPreferable),     # gap 1 → 3
+        ])
+        assert len(result) == 3
+        assert result[2].importance == QM.Moderate  # 3
+        assert result[2].rank == 3
+
+    def test_ordinal_never_below_zero(self):
+        """Differentials exceeding 6 are clamped to ordinal 0."""
+        D1 = Demographic(name="A")
+        D2 = Demographic(name="B")
+        anchor = DemographicMoralConcern(demographic=D1, facetOfProsperity="health", outlook="short-term")
+        c2 = DemographicMoralConcern(demographic=D2, facetOfProsperity="health", outlook="short-term")
+        result = build_moral_priorities_from_differentials(anchor, [
+            (c2, QDM.OverwhelminglyMoreOrLess),  # gap 6 → 0
+        ])
+        assert result[1].importance == QM.Negligible  # 0
+
+    def test_characteristic_band_concerns_work(self):
+        """Differential construction works with CharacteristicBandMoralConcern."""
+        C = NumericalCharacteristic(name="age", minValue=0, maxValue=120)
+        anchor = CharacteristicBandMoralConcern(
+            characteristicBands=[NumericalCharacteristicValueBand(characteristic=C, minValue=0, maxValue=18)],
+            facetOfProsperity="health", outlook="short-term",
+        )
+        result = build_moral_priorities_from_differentials(anchor, [])
+        assert result[0].importance == QM.ExtremelyHigh

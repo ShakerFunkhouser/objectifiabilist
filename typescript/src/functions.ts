@@ -5,11 +5,13 @@ import {
   ProsperityCharacteristic,
   QualitativeMagnitude,
   QualitativePreferability,
+  QualitativeDifferenceMagnitude,
   Group,
   MoralPriority,
   MoralConcern,
   DemographicMoralConcern,
   CharacteristicBandMoralConcern,
+  ConversionMetric,
   IndividualMember,
   BooleanCharacteristicValue,
   StringCharacteristicValue,
@@ -23,19 +25,70 @@ import {
   StatedPreferability,
   MoralPriorityDivergenceResult,
   MoralPriorityDivergenceSignal,
+  PreferabilityResult,
+  DeonticStatus,
+  SEJPOutput,
   classifyDivergenceBand,
   PREFERABILITY_ORDINAL_COUNT,
   PREFERABILITY_BUCKET_WIDTH,
   W_UNPREF,
 } from "./types";
 
-// Step 1: Resolve benefit magnitude to a normalized float in [0, 1]
-function resolveMagnitude(benefit: PossibleBenefit): number {
+// Step 1: Resolve benefit likelihood & magnitude
+// ---------------------------------------------------------------------------
+
+/** Collapse a probability range into a point estimate using the ambiguity parameter (§2.4). */
+function resolveLikelihood(
+  benefit: PossibleBenefit,
+  ambiguityAversion: number = 0.5,
+): number {
+  if (
+    benefit.likelihoodLow !== undefined &&
+    benefit.likelihoodLow !== null &&
+    benefit.likelihoodHigh !== undefined &&
+    benefit.likelihoodHigh !== null
+  ) {
+    return (
+      ambiguityAversion * benefit.likelihoodLow +
+      (1.0 - ambiguityAversion) * benefit.likelihoodHigh
+    );
+  }
+  return benefit.likelihood;
+}
+
+function resolveMagnitude(
+  benefit: PossibleBenefit,
+  conversionMetrics?: ConversionMetric[] | null,
+  group?: Group,
+): number {
   if (
     benefit.quantitativeMagnitude !== undefined &&
     benefit.quantitativeMagnitude !== null
   ) {
-    return Math.abs(benefit.quantitativeMagnitude);
+    let mag = Math.abs(benefit.quantitativeMagnitude);
+    // Normalize via ConversionMetric if applicable (§2.5)
+    if (conversionMetrics && benefit.quantitativeMetric) {
+      for (const cm of conversionMetrics) {
+        if (cm.fromMetric === benefit.quantitativeMetric) {
+          // Check demographic scope
+          if (cm.scope && group) {
+            let scopeMatch = false;
+            for (const dm of group.demographicMemberships ?? []) {
+              if (dm.demographic.name === cm.scope.name) {
+                scopeMatch = true;
+                break;
+              }
+            }
+            if (!scopeMatch) continue;
+          }
+          if (cm.extremelyBeneficialThreshold > 0) {
+            mag = Math.min(1.0, mag / cm.extremelyBeneficialThreshold);
+          }
+          break;
+        }
+      }
+    }
+    return mag;
   }
   if (
     benefit.qualitativeMagnitude !== undefined &&
@@ -51,8 +104,12 @@ function facetName(facet: string | ProsperityCharacteristic): string {
   return typeof facet === "string" ? facet : facet.name;
 }
 
-function signedMagnitude(benefit: PossibleBenefit): number {
-  const mag = resolveMagnitude(benefit);
+function signedMagnitude(
+  benefit: PossibleBenefit,
+  conversionMetrics?: ConversionMetric[] | null,
+  group?: Group,
+): number {
+  const mag = resolveMagnitude(benefit, conversionMetrics, group);
   if (benefit.signage === "negative") return -mag;
   if (benefit.signage === "zero") return 0.0;
   return mag;
@@ -62,7 +119,7 @@ function signedMagnitude(benefit: PossibleBenefit): number {
  * Compute raw benefit considering ideal state (minStatus/maxStatus) per §3.5.1.
  *
  * Range mode (both min and max specified, both non-zero):
- *   b_res = b_incoming  (b_existing = 0 for now)
+ *   b_res = b_incoming + b_existing
  *   If b_min ≤ b_res ≤ b_max:   raw = 1  (100% progress toward ideal)
  *   If b_res < b_min:           raw = 1 − (b_min − b_res) / b_min
  *   If b_res > b_max:           raw = 1 − (b_res − b_max) / b_max
@@ -72,7 +129,11 @@ function signedMagnitude(benefit: PossibleBenefit): number {
  *
  * No ideal state: returns b_incoming unchanged.
  */
-function idealRawBenefit(bIncoming: number, priority: MoralPriority): number {
+function idealRawBenefit(
+  bIncoming: number,
+  priority: MoralPriority,
+  bExisting: number = 0.0,
+): number {
   const bMinVal = priority.minStatus;
   const bMaxVal = priority.maxStatus;
 
@@ -80,7 +141,7 @@ function idealRawBenefit(bIncoming: number, priority: MoralPriority): number {
 
   const bMin = bMinVal !== undefined ? bMinVal / 6.0 : undefined;
   const bMax = bMaxVal !== undefined ? bMaxVal / 6.0 : undefined;
-  const bRes = bIncoming;
+  const bRes = bIncoming + bExisting;
 
   if (bMin !== undefined && bMax !== undefined && bMin > 0 && bMax > 0) {
     // Range mode
@@ -118,14 +179,24 @@ export function calculateWeightedNetBenefit(
   lambda: number = 1.0,
   gamma: number = 1.0,
   priority?: MoralPriority,
+  ambiguityAversion: number = 0.5,
+  conversionMetrics?: ConversionMetric[] | null,
+  group?: Group,
 ): number {
   if (!benefits || benefits.length === 0) return 0.0;
   const rawFn = priority
-    ? (b: PossibleBenefit) => idealRawBenefit(signedMagnitude(b), priority)
-    : signedMagnitude;
+    ? (b: PossibleBenefit) =>
+        idealRawBenefit(
+          signedMagnitude(b, conversionMetrics, group),
+          priority,
+          b.bExisting ?? 0.0,
+        )
+    : (b: PossibleBenefit) => signedMagnitude(b, conversionMetrics, group);
   return benefits.reduce(
     (sum, b) =>
-      sum + cptW(b.likelihood, gamma) * cptV(rawFn(b), alpha, beta, lambda),
+      sum +
+      cptW(resolveLikelihood(b, ambiguityAversion), gamma) *
+        cptV(rawFn(b), alpha, beta, lambda),
     0,
   );
 }
@@ -319,6 +390,7 @@ export function calculateMoralValueOfEffect(
   const beta = ethic.beta ?? 1.0;
   const lambda = ethic.lambda ?? 1.0;
   const gamma = ethic.gamma ?? 1.0;
+  const ambAversion = ethic.ambiguityAversion ?? 0.5;
 
   // Root moral value: sum over matching priorities of M_k × WNB_k
   let rootMoralValue = 0;
@@ -337,6 +409,9 @@ export function calculateMoralValueOfEffect(
         lambda,
         gamma,
         priority,
+        ambAversion,
+        ethic.conversionMetrics,
+        effect.affectedGroup,
       );
       rootMoralValue += Mk * wnbK;
     }
@@ -346,7 +421,7 @@ export function calculateMoralValueOfEffect(
   let chainValue = 0;
   for (const pb of effect.possibleBenefits) {
     if (pb.chainEffects && pb.chainEffects.length > 0) {
-      const wlj = cptW(pb.likelihood, gamma);
+      const wlj = cptW(resolveLikelihood(pb, ambAversion), gamma);
       const cj = pb.chainEffects.reduce(
         (sum, chain) => sum + calculateMoralValueOfEffect(chain, ethic),
         0,
@@ -404,38 +479,87 @@ function quantitativeToPreferabilityOrdinal(pAbs: number): number {
   return 0;
 }
 
+function computeDeonticStatus(
+  pAbs: number,
+  isProscribed: boolean,
+  ethic?: Ethic,
+): DeonticStatus {
+  if (isProscribed) return "prohibited";
+  if (ethic) {
+    const ordVal = quantitativeToPreferabilityOrdinal(pAbs);
+    if (
+      ethic.deonticProhibitionThreshold !== undefined &&
+      ordVal <= (ethic.deonticProhibitionThreshold as number)
+    )
+      return "prohibited";
+    if (
+      ethic.deonticSupererogationThreshold !== undefined &&
+      ordVal >= (ethic.deonticSupererogationThreshold as number)
+    )
+      return "supererogatory";
+  }
+  return "obligatory";
+}
+
 export function calculatePreferabilities(
   moralValences: Record<string, number>,
-): Record<string, QualitativePreferability> {
+  ethic?: Ethic,
+  proscribedBehaviorMap?: Record<string, boolean>,
+): Record<string, PreferabilityResult> {
   const keys = Object.keys(moralValences);
   if (keys.length === 0) return {};
   const vals = Object.values(moralValences);
   const minVal = Math.min(...vals);
   const maxVal = Math.max(...vals);
-  const result: Record<string, QualitativePreferability> = {};
+  const span = maxVal - minVal;
+  const maxValenceName = keys.reduce((best, name) =>
+    moralValences[name] > moralValences[best] ? name : best,
+  );
+  const proscribedMap = proscribedBehaviorMap ?? {};
+  const result: Record<string, PreferabilityResult> = {};
   for (const name of keys) {
     const val = moralValences[name];
-    const pAbs = calculateAbsolutePreferabilityQuantitative(val, minVal, maxVal);
-    result[name] = quantitativeToPreferabilityOrdinal(pAbs) as QualitativePreferability;
+    const pAbs = calculateAbsolutePreferabilityQuantitative(
+      val,
+      minVal,
+      maxVal,
+    );
+    const bucket = quantitativeToPreferabilityOrdinal(
+      pAbs,
+    ) as QualitativePreferability;
+    // Normalized relative preferability P_i (§3.8)
+    const pRel = span > 0 ? (val - minVal) / span : 0;
+    const isProscribed = proscribedMap[name] ?? false;
+    const deontic = computeDeonticStatus(pAbs, isProscribed, ethic);
+    result[name] = {
+      choiceName: name,
+      calculatedPreferability: bucket,
+      absolutePreferability: Math.round(pAbs * 1e6) / 1e6,
+      normalizedRelativePreferability: Math.round(pRel * 1e6) / 1e6,
+      deonticStatus: deontic,
+      isPrescribed: name === maxValenceName,
+    };
   }
   return result;
 }
 
 export function calculateDivergenceSignal(
-  stated: {
-    choiceName: string;
-    statedPreferability: QualitativePreferability;
-  }[],
-  computed: Record<string, QualitativePreferability>,
+  stated: StatedPreferability[],
+  computed:
+    | Record<string, QualitativePreferability>
+    | Record<string, PreferabilityResult>,
 ): DivergenceSignal {
   const statedMap: Record<string, number> = {};
   for (const s of stated) statedMap[s.choiceName] = s.statedPreferability;
   const perChoice: DivergenceResult[] = [];
   const k = PREFERABILITY_ORDINAL_COUNT;
   for (const choiceName in computed) {
-    const calcPref = computed[choiceName];
-    const statedOrd = statedMap[choiceName] ?? calcPref;
-    const calcOrd = calcPref;
+    const calcVal = computed[choiceName];
+    const calcOrd =
+      typeof calcVal === "object" && "calculatedPreferability" in calcVal
+        ? (calcVal.calculatedPreferability as number)
+        : (calcVal as number);
+    const statedOrd = statedMap[choiceName] ?? calcOrd;
     const signed = statedOrd - calcOrd;
     const absDiv = Math.abs(signed);
     perChoice.push({
@@ -466,16 +590,32 @@ export function calculateDivergenceSignal(
   };
 }
 
-export function evaluateSejpOutput(output: {
-  dilemma: Dilemma;
-  ethic: Ethic;
-  statedPreferabilities: {
-    choiceName: string;
-    statedPreferability: QualitativePreferability;
-  }[];
-}) {
+export function evaluateSejpOutput(output: SEJPOutput): DivergenceSignal {
   const valences = calculateAllMoralValences(output.dilemma, output.ethic);
-  const computed = calculatePreferabilities(valences);
+
+  // Build proscribed-behavior map from choice behaviors vs ethic.proscribedBehaviors
+  const proscribedBehaviors = new Set(output.ethic.proscribedBehaviors ?? []);
+  const proscribedMap: Record<string, boolean> = {};
+  if (proscribedBehaviors.size > 0) {
+    for (const choice of output.dilemma.choices) {
+      if (choice.behavior && proscribedBehaviors.has(choice.behavior)) {
+        proscribedMap[choice.name] = true;
+      }
+    }
+  }
+
+  // Check overriding duties via isActionPermitted
+  for (const choice of output.dilemma.choices) {
+    if (!isActionPermitted(choice, output.ethic)) {
+      proscribedMap[choice.name] = true;
+    }
+  }
+
+  const computed = calculatePreferabilities(
+    valences,
+    output.ethic,
+    proscribedMap,
+  );
   return calculateDivergenceSignal(output.statedPreferabilities, computed);
 }
 
@@ -484,9 +624,27 @@ export function getPrescribedChoice(
   ordainedEthic: Ethic,
 ): string {
   const valences = calculateAllMoralValences(dilemma, ordainedEthic);
-  return Object.keys(valences).reduce(
-    (best, name) => (valences[name] > valences[best] ? name : best),
-    Object.keys(valences)[0],
+  const proscribedBehaviors = new Set(ordainedEthic.proscribedBehaviors ?? []);
+
+  const permitted: Record<string, number> = {};
+  for (const choice of dilemma.choices) {
+    const isProhibited =
+      !isActionPermitted(choice, ordainedEthic) ||
+      (choice.behavior !== undefined &&
+        proscribedBehaviors.has(choice.behavior));
+    if (!isProhibited) {
+      permitted[choice.name] = valences[choice.name] ?? 0;
+    }
+  }
+
+  if (Object.keys(permitted).length > 0) {
+    return Object.keys(permitted).reduce((best, name) =>
+      permitted[name] > permitted[best] ? name : best,
+    );
+  }
+  // All choices prohibited — return least-bad
+  return Object.keys(valences).reduce((best, name) =>
+    valences[name] > valences[best] ? name : best,
   );
 }
 
@@ -495,10 +653,29 @@ export function getNamesOfChoicesSortedByDecreasingMoralValence(
   ordainedEthic: Ethic,
 ): string[] {
   const valences = calculateAllMoralValences(dilemma, ordainedEthic);
-  return Object.keys(valences).sort((a, b) => valences[b] - valences[a]);
+  const proscribedBehaviors = new Set(ordainedEthic.proscribedBehaviors ?? []);
+
+  const permitted: string[] = [];
+  const prohibited: string[] = [];
+  for (const choice of dilemma.choices) {
+    const isProhibited =
+      !isActionPermitted(choice, ordainedEthic) ||
+      (choice.behavior !== undefined &&
+        proscribedBehaviors.has(choice.behavior));
+    if (isProhibited) {
+      prohibited.push(choice.name);
+    } else {
+      permitted.push(choice.name);
+    }
+  }
+
+  permitted.sort((a, b) => valences[b] - valences[a]);
+  prohibited.sort((a, b) => valences[b] - valences[a]);
+  return [...permitted, ...prohibited];
 }
 
 export function isActionPermitted(choice: Choice, ethic: Ethic): boolean {
+  const ambAversion = ethic.ambiguityAversion ?? 0.5;
   // Check overriding duties (§3.7)
   for (const priority of ethic.moralPriorities) {
     for (const duty of priority.overridingDuties ?? []) {
@@ -674,8 +851,10 @@ export function extractMoralConcernsFromDilemma(
  * Builds the contribution matrix A where A[i][k] is the total weighted net-benefit
  * that concern k (at unit importance = 1) contributes to choice i's moral valence.
  * Reuses calculateWeightedNetBenefit and calculateImportance.
+ *
+ * @internal Exported for reuse by the polytope inference module (polytope.ts).
  */
-function buildContributionMatrix(
+export function buildContributionMatrix(
   dilemma: Dilemma,
   concerns: MoralConcern[],
   alpha: number,
@@ -943,4 +1122,53 @@ export function calculateMoralPriorityDivergenceSignal(
     meanNormativeDivergence: mean,
     normativeDivergenceBand: classifyDivergenceBand(mean),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Differential-based priority construction (§3.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Constructs a list of MoralPriority from a most-important anchor concern
+ * and a list of (concern, differential) pairs, where each differential is a
+ * QualitativeDifferenceMagnitude ordinal representing how much LESS important
+ * that concern is relative to the previous one (§3.2).
+ *
+ * The anchor concern is assigned ordinal 6 (Extremely high) importance and rank 1.
+ * Each subsequent concern gets an ordinal of `prevOrdinal − abs(differential)`.
+ *
+ * @example
+ * buildMoralPrioritiesFromDifferentials(MC1, [
+ *   [MC2, QualitativeDifferenceMagnitude.SlightlyMoreOrLessPreferable],  // gap 2 → MC2 = 6-2 = 4
+ *   [MC3, QualitativeDifferenceMagnitude.MarginallyMoreOrLessPreferable], // gap 1 → MC3 = 4-1 = 3
+ * ]);
+ *
+ * Returns MoralPriority[] with ordinal importances (0–6) and sequential ranks.
+ */
+export function buildMoralPrioritiesFromDifferentials(
+  anchorConcern: MoralConcern,
+  differentials: Array<[MoralConcern, QualitativeDifferenceMagnitude]>,
+): MoralPriority[] {
+  const result: MoralPriority[] = [];
+  let prevOrdinal = 6; // anchor starts at ExtremelyHigh
+
+  // Anchor concern: rank 1, ordinal 6
+  result.push({
+    moralConcern: anchorConcern,
+    importance: prevOrdinal as QualitativeMagnitude,
+    rank: 1,
+  });
+
+  let rank = 2;
+  for (const [concern, diff] of differentials) {
+    const diffVal = Math.abs(diff as number);
+    prevOrdinal = Math.max(0, prevOrdinal - diffVal);
+    result.push({
+      moralConcern: concern,
+      importance: prevOrdinal as QualitativeMagnitude,
+      rank: rank++,
+    });
+  }
+
+  return result;
 }

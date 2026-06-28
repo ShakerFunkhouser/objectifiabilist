@@ -131,11 +131,23 @@ export interface Group {
 
 export interface PossibleBenefit {
   likelihood: number;
+  /** Lower bound of a probability range (§2.4). When both likelihoodLow and likelihoodHigh
+   *  are present, the ethic's ambiguityAversion collapses them via
+   *  p_eff = a · p_low + (1−a) · p_high before CPT probability weighting. */
+  likelihoodLow?: number;
+  /** Upper bound of a probability range (§2.4). See likelihoodLow. */
+  likelihoodHigh?: number;
   qualitativeMagnitude?: QualitativeMagnitude;
   quantitativeMagnitude?: number;
   quantitativeMetric?: string;
   signage: Signage;
   description?: string;
+  /**
+   * Existing state of benefit for the affected concern before this benefit is applied.
+   * Used in ideal-state calculations per §3.5.1: b_res = b_incoming + b_existing.
+   * Defaults to 0 if not specified.
+   */
+  bExisting?: number;
   chainEffects?: Effect[];
 }
 
@@ -237,6 +249,17 @@ export interface Ethic {
   conversionMetrics?: ConversionMetric[];
   /** Behaviors that render a choice categorically inadmissible (§3.7). */
   proscribedBehaviors?: string[];
+  /**
+   * Deontic prohibition threshold (§2.3). Choices with absolute preferability
+   * below this ordinal are prohibited. Must be ≤ deonticSupererogationThreshold.
+   */
+  deonticProhibitionThreshold?: QualitativePreferability;
+  /**
+   * Deontic supererogation threshold (§2.3). Choices with absolute preferability
+   * above this ordinal are supererogatory. Choices between the two thresholds
+   * are obligatory.
+   */
+  deonticSupererogationThreshold?: QualitativePreferability;
 }
 
 export interface Dilemma {
@@ -250,9 +273,18 @@ export interface MoralValenceResult {
   moralValence: number;
 }
 
+/** Deontic status of a choice per §2.3 and §3.7. */
+export type DeonticStatus = "prohibited" | "obligatory" | "supererogatory";
+
 export interface PreferabilityResult {
   choiceName: string;
   calculatedPreferability: QualitativePreferability;
+  /** Quantitative absolute preferability P^abs in [0, 1] (§3.8). */
+  absolutePreferability: number;
+  /** Quantitative normalized relative preferability P_i in [0, 1] (§3.8). */
+  normalizedRelativePreferability: number;
+  /** Deontic status per §2.3 thresholds (prohibited/obligatory/supererogatory). */
+  deonticStatus: DeonticStatus;
   isPrescribed: boolean;
 }
 
@@ -340,10 +372,42 @@ export function getPreferabilityBounds(
 }
 
 /** Heuristic interpretive bands for mean prescriptive/normative divergence (§3.9, §3.11). */
-export function classifyDivergenceBand(
-  meanDivergence: number,
-): DivergenceBand {
+export function classifyDivergenceBand(meanDivergence: number): DivergenceBand {
   if (meanDivergence < 0.05) return "negligible";
   if (meanDivergence < 0.2) return "moderate";
   return "substantial";
+}
+
+// ---------------------------------------------------------------------------
+// Polytope inference results
+// ---------------------------------------------------------------------------
+
+/** Upper and lower bounds for a single moral concern's implied importance. */
+export interface PerConcernBounds {
+  moralConcern: MoralConcern;
+  minImportance: number;
+  maxImportance: number;
+  centroid: number; // (min + max) / 2
+}
+
+/**
+ * Result of the polytope approach to moral priority inference (§3.10).
+ *
+ * The polytope approach treats each stated preferability ordinal as a quantitative
+ * interval constraint (Table 4) and solves two linear programs per concern:
+ *   minimize / maximize  m_k
+ *   subject to           A·m ∈ [V_i^min, V_i^max]
+ *
+ * **TypeScript**: Use `inferMoralPrioritiesPolytopeAsync` (requires `highs-js`,
+ * an optional ~3 MB WebAssembly dependency). For a dependency-free alternative,
+ * use the simplified surrogate `inferMoralPriorities` (Vmax=1, Vmin=0 proxy).
+ *
+ * **Python**: Use `infer_moral_priorities_polytope` (requires `scipy`).
+ */
+export interface PolytopeInferenceResult {
+  perConcern: PerConcernBounds[];
+  /** Whether any feasible solution exists for the stated constraints. */
+  feasible: boolean;
+  /** Mean of centroid values across all concerns (normalized). */
+  meanCentroidImportance: number;
 }

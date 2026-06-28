@@ -5,7 +5,7 @@
  * This file is the single source of truth for all types.
  * The Pydantic models in models.py are derived from and must be kept in sync with this file.
  *
- * @see white-paper.md for full theoretical treatment
+ * @see Academic Paper.md for full theoretical treatment
  */
 
 // ---------------------------------------------------------------------------
@@ -29,6 +29,7 @@ export enum QualitativeMagnitude {
   ExtremelyHigh = 6,
 }
 
+/** Qualitative difference between adjacent moral priorities or preferabilities (Table 3). */
 export enum QualitativeDifferenceMagnitude {
   EquallyImportant = 0,
   MarginallyMoreOrLessPreferable = 1,
@@ -41,8 +42,8 @@ export enum QualitativeDifferenceMagnitude {
 
 /**
  * 7-value qualitative scale for the preferability of a choice.
- * Mapped from moral valences via absolute preferability (P^abs = V_i / V_max) onto 7 equal buckets.
- * Ordinal values (0–6) map to equal-width intervals in [0, 1].
+ * Mapped from moral valences via absolute preferability (P^abs) onto 7 equal buckets.
+ * Ordinal values (0–6) map to equal-width intervals in [0, 1] per Table 4.
  */
 export enum QualitativePreferability {
   ExtremelyUnpreferable = 0,
@@ -58,37 +59,37 @@ export enum QualitativePreferability {
 // Characteristics
 // ---------------------------------------------------------------------------
 
-interface Characteristic {
+export interface BooleanCharacteristic {
+  kind: "boolean";
   name: string;
   description?: string;
+  defaultValue?: boolean;
 }
 
-export type BooleanCharacteristic = Characteristic & {
-  kind: "boolean";
-  defaultValue?: boolean;
-};
-
-export type StringCharacteristic = Characteristic & {
+export interface StringCharacteristic {
   kind: "string";
+  name: string;
+  description?: string;
   possibleValues: string[];
   defaultValue?: string;
-};
+}
 
-export type NumericalCharacteristic = Characteristic & {
+export interface NumericalCharacteristic {
   kind: "numerical";
+  name: string;
+  description?: string;
   unit?: string;
   minValue?: number;
   maxValue?: number;
   defaultValue?: number;
-};
+}
 
-/**
- * A dimension of well-being (e.g. health, wealth, autonomy).
- * When referenced as a plain string, the string is the characteristic name.
- */
-export type ProsperityCharacteristic = Characteristic & {
+/** A dimension of well-being (e.g. health, wealth, autonomy). */
+export interface ProsperityCharacteristic {
   kind: "prosperity";
-};
+  name: string;
+  description?: string;
+}
 
 export type AnyCharacteristic =
   | BooleanCharacteristic
@@ -100,22 +101,22 @@ export type AnyCharacteristic =
 // Characteristic values (used to describe individuals and demographics)
 // ---------------------------------------------------------------------------
 
-export type BooleanCharacteristicValue = {
+export interface BooleanCharacteristicValue {
   characteristic: BooleanCharacteristic;
   value: boolean;
-};
+}
 
-export type StringCharacteristicValue = {
+export interface StringCharacteristicValue {
   characteristic: StringCharacteristic;
   value: string;
-};
+}
 
 /** An inclusive band [minValue, maxValue] for a numerical characteristic. */
-export type NumericalCharacteristicValueBand = {
+export interface NumericalCharacteristicValueBand {
   characteristic: NumericalCharacteristic;
   minValue?: number;
   maxValue?: number;
-};
+}
 
 export type AnyCharacteristicValue =
   | BooleanCharacteristicValue
@@ -131,39 +132,39 @@ export type AnyCharacteristicValue =
  * An individual satisfies a demographic if their values satisfy ALL specified constraints
  * (unspecified characteristics are unconstrained — the individual qualifies regardless).
  */
-export type Demographic = {
+export interface Demographic {
   name: string;
   description?: string;
   booleanValues?: BooleanCharacteristicValue[];
   stringValues?: StringCharacteristicValue[];
   numericalBands?: NumericalCharacteristicValueBand[];
-};
+}
 
 // ---------------------------------------------------------------------------
 // Groups
 // ---------------------------------------------------------------------------
 
+/** A single numeric value for a characteristic (for individual members). */
+export interface NumericalCharacteristicPoint {
+  characteristic: NumericalCharacteristic;
+  value: number;
+}
+
 /**
  * An individual member of a group, described by their characteristic values.
  * Used when the group composition is heterogeneous or a specific person is at stake.
  */
-export type IndividualMember = {
+export interface IndividualMember {
   booleanValues?: BooleanCharacteristicValue[];
   stringValues?: StringCharacteristicValue[];
-  numericalValues?: Array<{
-    characteristic: NumericalCharacteristic;
-    value: number;
-  }>;
-};
+  numericalValues?: NumericalCharacteristicPoint[];
+}
 
-/**
- * A count of group members who belong to a particular demographic.
- * Used when group membership is expressed via demographic categories.
- */
-export type DemographicMembership = {
+/** A count of group members who belong to a particular demographic. */
+export interface DemographicMembership {
   demographic: Demographic;
   count: number;
-};
+}
 
 /**
  * A count of group members whose known characteristic values satisfy a set of bands.
@@ -174,10 +175,10 @@ export type DemographicMembership = {
  * as satisfied. CharacteristicBandMemberships are matched ONLY against
  * CharacteristicBandMoralConcerns, never against DemographicMoralConcerns.
  */
-export type CharacteristicBandMembership = {
+export interface CharacteristicBandMembership {
   characteristicBands: AnyCharacteristicValue[];
   count: number;
-};
+}
 
 /**
  * A group is the set of people affected by an effect.
@@ -191,13 +192,21 @@ export type CharacteristicBandMembership = {
  *                     DemographicMoralConcerns (strict: all demographic constraints must
  *                     be covered by the individual's declared values)
  */
-export type Group = {
+export interface Group {
   name: string;
   description?: string;
   demographicMemberships?: DemographicMembership[];
   characteristicBandMemberships?: CharacteristicBandMembership[];
   individuals?: IndividualMember[];
-};
+  /**
+   * Circumstantial importance adjustment applied additively to any moral priority
+   * that matches this group. Positive = increased moral standing (e.g., relatedness).
+   * Negative = decreased (e.g., fault). Per §2.1, circumstantial characteristics
+   * like "relatedness to agent" and "fault for the conflict arising" modify group
+   * importance as additive offsets.
+   */
+  circumstantialAdjustment?: number;
+}
 
 // ---------------------------------------------------------------------------
 // Benefits
@@ -209,9 +218,15 @@ export type Group = {
  * If quantitativeMagnitude is present, quantitativeMetric should also be present
  * so that the ethic's conversion metrics can normalize it.
  */
-export type PossibleBenefit = {
-  /** Objective probability that this outcome occurs. */
+export interface PossibleBenefit {
+  /** Probability that this outcome occurs (0–1). */
   likelihood: number;
+  /** Lower bound of a probability range (§2.4). When both likelihoodLow and likelihoodHigh
+   *  are present, the ethic's ambiguityAversion collapses them via
+   *  p_eff = a · p_low + (1−a) · p_high before CPT probability weighting. */
+  likelihoodLow?: number;
+  /** Upper bound of a probability range (§2.4). See likelihoodLow. */
+  likelihoodHigh?: number;
   qualitativeMagnitude?: QualitativeMagnitude;
   /** Raw numeric magnitude in the units of quantitativeMetric. */
   quantitativeMagnitude?: number;
@@ -219,37 +234,53 @@ export type PossibleBenefit = {
   quantitativeMetric?: string;
   signage: Signage;
   description?: string;
-  /** Downstream effects triggered by this possible benefit. */
+  /**
+   * Existing state of benefit for the affected concern before this benefit is applied.
+   * Used in ideal-state calculations per §3.5.1: b_res = b_incoming + b_existing.
+   * Defaults to 0 if not specified.
+   */
+  bExisting?: number;
+  /**
+   * Downstream effects triggered when this possible benefit occurs.
+   * Weighted by this PB's likelihood in moral value calculations.
+   * Per §3.5.2: c = Σ L_chain × A_chain.
+   */
   chainEffects?: Effect[];
-};
+}
 
 // ---------------------------------------------------------------------------
-// Effects
+// Effects (recursive via chainEffects)
 // ---------------------------------------------------------------------------
 
 /**
  * An effect describes the impact of a choice on a group along a facet of prosperity.
  * Chain effects are effects caused by this effect and must be computed recursively.
  */
-export type Effect = {
+export interface Effect {
   affectedGroup: Group;
   facetOfProsperity: string | ProsperityCharacteristic;
   /** e.g. "short-term" | "long-term" */
   outlook: string;
   possibleBenefits: PossibleBenefit[];
-};
+  /**
+   * Probability that this effect transpires.
+   * Defaults to 1.0 (certain). The moral value of the effect is multiplied by
+   * this likelihood when computing the moral valence of the parent choice (§2.1).
+   */
+  likelihood?: number;
+}
 
 // ---------------------------------------------------------------------------
 // Choices
 // ---------------------------------------------------------------------------
 
-export type Choice = {
+export interface Choice {
   name: string;
   description?: string;
   /** Label for behavior-based proscription matching (see Ethic.proscribedBehaviors). */
   behavior?: string;
   effects: Effect[];
-};
+}
 
 // ---------------------------------------------------------------------------
 // Moral concerns
@@ -257,28 +288,26 @@ export type Choice = {
 
 /**
  * A demographic-based moral concern: care about a specific named demographic
- * along a facet of prosperity for a given outlook. In future, outlook can be
- * specified more robustly.
+ * along a facet of prosperity for a given outlook.
  */
-export type DemographicMoralConcern = {
+export interface DemographicMoralConcern {
   kind: "demographic";
   demographic: Demographic;
   facetOfProsperity: string | ProsperityCharacteristic;
   outlook: string;
-};
+}
 
 /**
  * A characteristic-band moral concern: care about individuals satisfying ALL
  * of the specified characteristic constraints, along a facet of prosperity.
  * Used when the moral concern does not map cleanly to a predefined demographic.
- * In future, outlook can be specified more robustly.
  */
-export type CharacteristicBandMoralConcern = {
+export interface CharacteristicBandMoralConcern {
   kind: "characteristicBand";
   characteristicBands: AnyCharacteristicValue[];
   facetOfProsperity: string | ProsperityCharacteristic;
   outlook: string;
-};
+}
 
 export type MoralConcern =
   | DemographicMoralConcern
@@ -290,40 +319,47 @@ export type MoralConcern =
 
 /**
  * A moral priority associates a moral concern with a weight of importance.
- * importance can be expressed qualitatively (QualitativeMagnitude) or quantitatively.
- * Calculation functions use the quantitative form; qualitative is converted via ordinal/7.
+ * importance can be expressed qualitatively (QualitativeMagnitude) or as a
+ * normalized float in [0, 1]. Calculation functions convert qualitative
+ * ordinals via ordinal / 6.
  */
-export type MoralPriority = {
+export interface MoralPriority {
   moralConcern: MoralConcern;
-  minStatus?: QualitativeMagnitude;
-  loweringBelowMinStatusIsCategoricallyProhibited?: boolean;
-  maxStatus?: QualitativeMagnitude;
-  raisingAboveMaxStatusIsCategoricallyProhibited?: boolean;
+  /** Importance as QualitativeMagnitude ordinal (0–6) or normalized float in [0, 1]. */
+  importance: QualitativeMagnitude | number;
   rank?: number;
-  quantitativeImportance?: number;
-  qualitativeImportance?: QualitativeMagnitude;
-  //qualitativeDifferenceImportanceFromNextLowestPriority cannot be defined if either qualitativeImportance
-  // or quantitativeImportance are defined; you're either making an absolute comparison or a relative comparison, not both
-  qualitativeDifferenceInImportanceFromNextLowestPriority?: QualitativeDifferenceMagnitude;
-  // detrimentInviolabilityThreshold?: QualitativeMagnitude;
+  /** Minimum qualitative status of benefit for this concern (§3.5.1). */
+  minStatus?: QualitativeMagnitude;
+  /** Maximum qualitative status of benefit for this concern (§3.5.1). */
+  maxStatus?: QualitativeMagnitude;
   overridingDuties?: OverridingDuty[];
-};
+  /** Lower bound on inferred importance under simplified inverse (§3.10): m_d − W. */
+  importanceLowerBound?: number;
+  /** Upper bound on inferred importance under simplified inverse (§3.10): m_d + W. */
+  importanceUpperBound?: number;
+}
 
-//violating these considerations is categorically proscribed unless all choices available
-//are categorically proscribed, in which case need to compute morality of all choices and
-//determine least bad option
-export type OverridingDuty = {
+/**
+ * A deontological constraint (§3.7). When a choice benefits the
+ * beneficiaryMoralConcern while imposing detriment on the moral concern
+ * that owns this duty beyond the inviolability threshold, the choice
+ * is prohibited.
+ */
+export interface OverridingDuty {
   beneficiaryMoralConcern: MoralConcern;
-  obligatoryDetrimentThreshold: QualitativeMagnitude; //between this as inviolability threshold is supererogatory
-  // supererogatoryDetrimentThreshold: QualitativeMagnitude;
+  /** Detriment threshold at which the duty activates (evaluative activation). */
+  obligatoryDetrimentThreshold: QualitativeMagnitude;
+  /** Beneficiary count at which detriment transitions from
+   *  supererogatory to obligatory. Default 1. */
   supererogatoryBecomesObligatoryAtBeneficiaryCount?: number;
-  detrimentInviolabilityThreshold?: QualitativeMagnitude; //beyond this threshold is "too nice", being prohibited
-  inviolabilityBecomesSupererogatoryAtBeneficiaryCount?: number; //must be less than or equal to supererogatory beneficiary count
-};
-
-// enum OverridingObligationTiebreakApproach {
-
-// }
+  /** Detriment beyond which benefit to the beneficiary is prohibited.
+   *  Defaults to obligatoryDetrimentThreshold if not set. */
+  detrimentInviolabilityThreshold?: QualitativeMagnitude;
+  /** Beneficiary count at which the inviolability threshold relaxes,
+   *  making the detriment supererogatory instead of prohibited.
+   *  Must be ≤ supererogatoryBecomesObligatoryAtBeneficiaryCount. */
+  inviolabilityBecomesSupererogatoryAtBeneficiaryCount?: number;
+}
 
 // ---------------------------------------------------------------------------
 // Conversion metrics
@@ -334,93 +370,126 @@ export type OverridingDuty = {
  * scope, if present, restricts the conversion to members of a particular demographic
  * (e.g. $1M is "extremely beneficial" for the average person but not for a billionaire).
  */
-export type ConversionMetric = {
+export interface ConversionMetric {
   fromMetric: string;
-  /** Quantity of fromMetric equivalent to "extremely beneficial" (ordinal 7). */
+  /** Quantity of fromMetric equivalent to "extremely beneficial" (ordinal 6). */
   extremelyBeneficialThreshold: number;
   scope?: Demographic;
-};
+}
 
 // ---------------------------------------------------------------------------
 // Ethic
 // ---------------------------------------------------------------------------
 
-export type Ethic = {
+export interface Ethic {
   name: string;
   moralPriorities: MoralPriority[];
-  /** CPT probability-weighting curvature. γ = 1 yields linear weighting (default). */
-  gamma?: number;
-  /** CPT value-function parameters. α governs diminishing sensitivity to gains,
-   *  β governs diminishing sensitivity to losses, λ governs loss aversion.
-   *  Defaults: α = β = λ = 1 (no distortion). */
+  /** CPT value function gain exponent. Default 1 = linear. */
   alpha?: number;
+  /** CPT value function loss exponent. Default 1 = linear. */
   beta?: number;
+  /** CPT loss-aversion coefficient. Default 1 = no aversion. */
   lambda?: number;
-  /** Ambiguity parameter. Collapses probability ranges [pLow, pHigh] via
-   *  pEff = a · pLow + (1−a) · pHigh. 0 = optimistic, 0.5 = indifference, 1 = maximin. */
+  /** CPT probability-weighting curvature. Default 1 = identity. */
+  gamma?: number;
+  /** Ambiguity parameter a ∈ [0, 1]. Collapses probability ranges [pLow, pHigh] via
+   *  pEff = a · pLow + (1−a) · pHigh. 0 = optimistic, 0.5 = indifference, 1 = maximin.
+   *  Default 0.5. */
   ambiguityAversion?: number;
   conversionMetrics?: ConversionMetric[];
+  /** Behaviors that render a choice categorically inadmissible (§3.7). */
   proscribedBehaviors?: string[];
-};
-
-export type Outcome = {};
+  /**
+   * Deontic prohibition threshold (§2.3). Choices with absolute preferability
+   * below this ordinal are prohibited. Must be ≤ deonticSupererogationThreshold.
+   */
+  deonticProhibitionThreshold?: QualitativePreferability;
+  /**
+   * Deontic supererogation threshold (§2.3). Choices with absolute preferability
+   * above this ordinal are supererogatory. Choices between the two thresholds
+   * are obligatory.
+   */
+  deonticSupererogationThreshold?: QualitativePreferability;
+}
 
 // ---------------------------------------------------------------------------
 // Dilemma
 // ---------------------------------------------------------------------------
 
-export type Dilemma = {
+export interface Dilemma {
   name: string;
   description?: string;
   choices: Choice[];
-};
+}
 
 // ---------------------------------------------------------------------------
 // Results
 // ---------------------------------------------------------------------------
 
-export type MoralValenceResult = {
+export interface MoralValenceResult {
   choiceName: string;
   moralValence: number;
-};
+}
 
-export type PreferabilityResult = {
+/** Deontic status of a choice per §2.3 and §3.7. */
+export type DeonticStatus = "prohibited" | "obligatory" | "supererogatory";
+
+export interface PreferabilityResult {
   choiceName: string;
   calculatedPreferability: QualitativePreferability;
+  /** Quantitative absolute preferability P^abs in [0, 1] (§3.8). */
+  absolutePreferability: number;
+  /** Quantitative normalized relative preferability P_i in [0, 1] (§3.8). */
+  normalizedRelativePreferability: number;
+  /** Deontic status per §2.3 thresholds (prohibited/obligatory/supererogatory). */
+  deonticStatus: DeonticStatus;
   isPrescribed: boolean;
-};
+}
 
-export type DivergenceResult = {
+export interface DivergenceResult {
   choiceName: string;
   statedOrdinal: number;
   calculatedOrdinal: number;
   /** Positive = overstated; negative = understated relative to computed preferability. */
   signedDivergence: number;
   absoluteDivergence: number;
-};
+  /** |signedDivergence| / k where k = 7 ordinals (§3.9). */
+  normalizedDivergence: number;
+}
 
-export type DivergenceSignal = {
+export type DivergenceBand = "negligible" | "moderate" | "substantial";
+
+export interface DivergenceSignal {
   perChoice: DivergenceResult[];
+  /** Mean raw ordinal gap |O_purported − O_predicted| (legacy scale 0–6). */
   meanAbsoluteDivergence: number;
-};
+  /** Total prescriptive divergence D = Σ Δ_i (§3.9). */
+  totalPrescriptiveDivergence: number;
+  /** Mean prescriptive divergence Δ̄ = D / n (§3.9). */
+  meanPrescriptiveDivergence: number;
+  /** Heuristic interpretive band for Δ̄ (§3.9). */
+  prescriptiveDivergenceBand: DivergenceBand;
+}
 
 // ---------------------------------------------------------------------------
 // SEJP evaluation input
 // ---------------------------------------------------------------------------
+
+export interface StatedPreferability {
+  choiceName: string;
+  statedPreferability: QualitativePreferability;
+}
 
 /**
  * The input bundle for a SEJP divergence computation.
  * Combines a dilemma, an ethic, and a set of stated preferabilities so that
  * recomputed moral valences can be compared against stated ones to produce a DivergenceSignal.
  */
-export type SEJPOutput = {
+export interface SEJPOutput {
   dilemma: Dilemma;
   ethic: Ethic;
-  statedPreferabilities: Array<{
-    choiceName: string;
-    statedPreferability: QualitativePreferability;
-  }>;
-};
+  statedPreferabilities: StatedPreferability[];
+}
 
 // ---------------------------------------------------------------------------
 // Moral priority inference results
@@ -432,7 +501,7 @@ export type SEJPOutput = {
  * Positive signedDivergence = purported importance overstated relative to what
  * the stated preferabilities imply.
  */
-export type MoralPriorityDivergenceResult = {
+export interface MoralPriorityDivergenceResult {
   moralConcern: MoralConcern;
   /** Importance drawn from the purported ethic, normalized to [0, 1]. 0 if concern has no matching purported priority. */
   purportedImportance: number;
@@ -441,9 +510,86 @@ export type MoralPriorityDivergenceResult = {
   /** purportedImportance − inferredImportance */
   signedDivergence: number;
   absoluteDivergence: number;
-};
+}
 
-export type MoralPriorityDivergenceSignal = {
+export interface MoralPriorityDivergenceSignal {
   perConcern: MoralPriorityDivergenceResult[];
+  /** Mean |δ_k| on normalized importances (alias for meanNormativeDivergence). */
   meanAbsoluteDivergence: number;
-};
+  /** Total normative divergence N = Σ|δ_k| (§3.11). */
+  totalNormativeDivergence: number;
+  /** Mean normative divergence N̄ = N / d (§3.11). */
+  meanNormativeDivergence: number;
+  /** Heuristic interpretive band for N̄ (§3.11). */
+  normativeDivergenceBand: DivergenceBand;
+}
+
+// ---------------------------------------------------------------------------
+// Polytope inference results
+// ---------------------------------------------------------------------------
+
+/** Upper and lower bounds for a single moral concern's implied importance. */
+export interface PerConcernBounds {
+  moralConcern: MoralConcern;
+  minImportance: number;
+  maxImportance: number;
+  centroid: number; // (min + max) / 2
+}
+
+/**
+ * Result of the polytope approach to moral priority inference (§3.10).
+ *
+ * The polytope approach treats each stated preferability ordinal as a quantitative
+ * interval constraint (Table 4) and solves two linear programs per concern:
+ *   minimize / maximize  m_k
+ *   subject to           A·m ∈ [V_i^min, V_i^max]
+ *
+ * **TypeScript**: Use `inferMoralPrioritiesPolytopeAsync` (requires `highs-js`,
+ * an optional ~3 MB WebAssembly dependency). For a dependency-free alternative,
+ * use the simplified surrogate `inferMoralPriorities` (Vmax=1, Vmin=0 proxy).
+ *
+ * **Python**: Use `infer_moral_priorities_polytope` (requires `scipy`).
+ */
+export interface PolytopeInferenceResult {
+  perConcern: PerConcernBounds[];
+  /** Whether any feasible solution exists for the stated constraints. */
+  feasible: boolean;
+  /** Mean of centroid values across all concerns (normalized). */
+  meanCentroidImportance: number;
+}
+
+// ---------------------------------------------------------------------------
+// Constants (§3.8 / Table 4)
+// ---------------------------------------------------------------------------
+
+/** Number of preferability ordinals (0–6). */
+export const PREFERABILITY_ORDINAL_COUNT = 7;
+
+/** Width of a single preferability bucket: 1/7 ≈ 0.143 (§3.8). */
+export const PREFERABILITY_BUCKET_WIDTH = 1 / 7;
+
+/** Upper quantitative bound of the below-neutral region in Table 4 (0.43). */
+export const W_UNPREF = 0.43;
+
+/** Return (P_min, P_max) absolute-preferability interval for ordinal 0–6 (Table 4). */
+export function getPreferabilityBounds(
+  ordinal: QualitativePreferability | number,
+): [number, number] {
+  const buckets: Record<number, [number, number]> = {
+    0: [0.0, 0.15],
+    1: [0.15, 0.29],
+    2: [0.29, 0.43],
+    3: [0.43, 0.57],
+    4: [0.57, 0.71],
+    5: [0.71, 0.85],
+    6: [0.85, 1.0],
+  };
+  return buckets[ordinal as number] ?? [0.0, 1.0];
+}
+
+/** Heuristic interpretive bands for mean prescriptive/normative divergence (§3.9, §3.11). */
+export function classifyDivergenceBand(meanDivergence: number): DivergenceBand {
+  if (meanDivergence < 0.05) return "negligible";
+  if (meanDivergence < 0.2) return "moderate";
+  return "substantial";
+}

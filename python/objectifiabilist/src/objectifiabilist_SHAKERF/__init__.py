@@ -56,6 +56,8 @@ from .models import (
     NumericalCharacteristicPoint,
     NumericalCharacteristicValueBand,
     OverridingDuty,
+    PerConcernBounds,
+    PolytopeInferenceResult,
     PREFERABILITY_BUCKET_WIDTH,
     PREFERABILITY_ORDINAL_COUNT,
     ProsperityCharacteristic,
@@ -75,6 +77,7 @@ from .models import (
 
 from .functions import (
     _build_hostage_dilemma,
+    build_moral_priorities_from_differentials,
     calculate_absolute_preferability_quantitative,
     calculate_all_moral_valences,
     calculate_divergence_signal,
@@ -87,6 +90,7 @@ from .functions import (
     evaluate_sejp_output,
     extract_moral_concerns_from_dilemma,
     infer_moral_priorities,
+    infer_moral_priorities_polytope,
     # SEJP-Guard enforcement primitives
     get_prescribed_choice,
     get_names_of_choices_sorted_by_decreasing_moral_valence,
@@ -116,6 +120,8 @@ __all__ = [
     "OverridingDuty",
     "NumericalCharacteristicPoint",
     "NumericalCharacteristicValueBand",
+    "PerConcernBounds",
+    "PolytopeInferenceResult",
     "ProsperityCharacteristic",
     "PossibleBenefit",
     "PreferabilityResult",
@@ -134,6 +140,7 @@ __all__ = [
     "classify_divergence_band",
     "get_preferability_bounds",
     # Functions
+    "build_moral_priorities_from_differentials",
     "calculate_absolute_preferability_quantitative",
     "calculate_all_moral_valences",
     "calculate_divergence_signal",
@@ -146,6 +153,7 @@ __all__ = [
     "evaluate_sejp_output",
     "extract_moral_concerns_from_dilemma",
     "infer_moral_priorities",
+    "infer_moral_priorities_polytope",
     # SEJP-Guard
     "get_prescribed_choice",
     "get_names_of_choices_sorted_by_decreasing_moral_valence",

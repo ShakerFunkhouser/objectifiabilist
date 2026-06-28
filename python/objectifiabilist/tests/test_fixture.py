@@ -118,8 +118,8 @@ def test_moral_valence_matches_fixture(fixture, pipeline_results, choice):
 def test_preferability_matches_fixture(fixture, pipeline_results, choice):
     _, prefs = pipeline_results
     expected_ordinal = fixture["expectedResults"]["calculatedPreferabilities"][choice]
-    assert prefs[choice].value == expected_ordinal, (
-        f"{choice}: computed {prefs[choice].value}, fixture {expected_ordinal}"
+    assert int(prefs[choice].calculatedPreferability) == expected_ordinal, (
+        f"{choice}: computed {int(prefs[choice].calculatedPreferability)}, fixture {expected_ordinal}"
     )
 
 

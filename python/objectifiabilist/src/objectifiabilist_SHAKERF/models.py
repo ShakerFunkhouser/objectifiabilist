@@ -91,7 +91,7 @@ class ProsperityCharacteristic(BaseModel):
 
 
 AnyCharacteristic = Annotated[
-    Union[BooleanCharacteristic, StringCharacteristic, NumericalCharacteristic],
+    Union[BooleanCharacteristic, StringCharacteristic, NumericalCharacteristic, ProsperityCharacteristic],
     Field(discriminator="kind"),
 ]
 
@@ -187,11 +187,21 @@ class Group(BaseModel):
 
 class PossibleBenefit(BaseModel):
     likelihood: float
+    """Lower bound of a probability range (§2.4). When both likelihoodLow and likelihoodHigh
+    are present, the ethic's ambiguityAversion parameter collapses them via
+    p_eff = a · p_low + (1−a) · p_high before probability weighting."""
+    likelihoodLow: Optional[float] = None
+    """Upper bound of a probability range (§2.4). See likelihoodLow."""
+    likelihoodHigh: Optional[float] = None
     qualitativeMagnitude: Optional[QualitativeMagnitude] = None
     quantitativeMagnitude: Optional[float] = None
     quantitativeMetric: Optional[str] = None
     signage: Signage
     description: Optional[str] = None
+    """Existing state of benefit for the affected concern before this benefit is applied.
+    Used in ideal-state calculations per §3.5.1: b_res = b_incoming + b_existing.
+    Defaults to 0 if not specified."""
+    bExisting: float = 0.0
     """Cascading effects triggered when this possible benefit occurs.
     Weighted by this PB's likelihood in moral value calculations.
     Per Section 3.2: H = l × [(b × M) + c] where c = Σ L_chain × A_chain."""
@@ -324,6 +334,13 @@ class Ethic(BaseModel):
     conversionMetrics: Optional[list[ConversionMetric]] = None
     """Behaviors that render a choice categorically inadmissible (§3.7)."""
     proscribedBehaviors: Optional[list[str]] = None
+    """Deontic prohibition threshold (§2.3). Choices with absolute preferability
+    below this ordinal are prohibited. Must be ≤ deonticSupererogationThreshold."""
+    deonticProhibitionThreshold: Optional[QualitativePreferability] = None
+    """Deontic supererogation threshold (§2.3). Choices with absolute preferability
+    above this ordinal are supererogatory. Choices between the two thresholds
+    are obligatory."""
+    deonticSupererogationThreshold: Optional[QualitativePreferability] = None
 
 
 # ---------------------------------------------------------------------------
@@ -345,9 +362,18 @@ class MoralValenceResult(BaseModel):
     moralValence: float
 
 
+DeonticStatus = Literal["prohibited", "obligatory", "supererogatory"]
+
+
 class PreferabilityResult(BaseModel):
     choiceName: str
     calculatedPreferability: QualitativePreferability
+    """Quantitative absolute preferability P^abs in [0, 1] (§3.8)."""
+    absolutePreferability: float
+    """Quantitative normalized relative preferability P_i in [0, 1] (§3.8)."""
+    normalizedRelativePreferability: float
+    """Deontic status per §2.3 thresholds (prohibited/obligatory/supererogatory)."""
+    deonticStatus: DeonticStatus = "obligatory"
     isPrescribed: bool
 
 

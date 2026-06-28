@@ -8,14 +8,18 @@ import {
   calculateMoralPriorityDivergenceSignal,
   calculateMoralValueOfEffect,
   isActionPermitted,
+  buildMoralPrioritiesFromDifferentials,
 } from "./functions";
 import {
   PossibleBenefit,
   QualitativeMagnitude,
   QualitativePreferability,
+  QualitativeDifferenceMagnitude,
   NumericalCharacteristic,
   NumericalCharacteristicValueBand,
+  ConversionMetric,
   Demographic,
+  DemographicMembership,
   Group,
   CharacteristicBandMembership,
   Effect,
@@ -25,6 +29,7 @@ import {
   OverridingDuty,
   StatedPreferability,
   DemographicMoralConcern,
+  CharacteristicBandMoralConcern,
   Choice,
   Signage,
 } from "./types";
@@ -655,7 +660,7 @@ describe("worked-example fixture: moral valences + preferabilities", () => {
       const expected = FIXTURE.expectedResults.calculatedPreferabilities[
         choice
       ] as number;
-      expect(prefs[choice]).toBe(expected);
+      expect(prefs[choice].calculatedPreferability).toBe(expected);
     },
   );
 
@@ -1300,5 +1305,298 @@ describe("isActionPermitted – overriding duties", () => {
       ],
     };
     expect(isActionPermitted(choice, ethic)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ambiguity aversion — probability range collapse (§2.4)
+// ---------------------------------------------------------------------------
+
+describe("ambiguityAversion probability collapse", () => {
+  it("point likelihood unchanged by ambiguity parameter", () => {
+    const pb: PossibleBenefit = {
+      likelihood: 0.7,
+      qualitativeMagnitude: QualitativeMagnitude.Moderate,
+      signage: "positive",
+    };
+    // ambiguityAversion has no effect when no range is specified
+    // 0.7 × 3/6 = 0.35
+    expect(
+      calculateWeightedNetBenefit([pb], 1, 1, 1, 1, undefined, 0.0),
+    ).toBeCloseTo(0.35);
+    expect(
+      calculateWeightedNetBenefit([pb], 1, 1, 1, 1, undefined, 1.0),
+    ).toBeCloseTo(0.35);
+  });
+
+  it("maximin (a=1) collapses to low bound", () => {
+    const pb: PossibleBenefit = {
+      likelihood: 0,
+      likelihoodLow: 0.3,
+      likelihoodHigh: 0.9,
+      qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+      signage: "positive",
+    };
+    // p_eff = 1*0.3 + 0*0.9 = 0.3; WNB = 0.3 * 1.0 = 0.3
+    expect(
+      calculateWeightedNetBenefit([pb], 1, 1, 1, 1, undefined, 1.0),
+    ).toBeCloseTo(0.3);
+  });
+
+  it("max optimism (a=0) collapses to high bound", () => {
+    const pb: PossibleBenefit = {
+      likelihood: 0,
+      likelihoodLow: 0.3,
+      likelihoodHigh: 0.9,
+      qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+      signage: "positive",
+    };
+    expect(
+      calculateWeightedNetBenefit([pb], 1, 1, 1, 1, undefined, 0.0),
+    ).toBeCloseTo(0.9);
+  });
+
+  it("indifference (a=0.5) uses midpoint", () => {
+    const pb: PossibleBenefit = {
+      likelihood: 0,
+      likelihoodLow: 0.2,
+      likelihoodHigh: 0.8,
+      qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+      signage: "positive",
+    };
+    expect(
+      calculateWeightedNetBenefit([pb], 1, 1, 1, 1, undefined, 0.5),
+    ).toBeCloseTo(0.5);
+  });
+
+  it("missing one bound falls back to point likelihood", () => {
+    const pb: PossibleBenefit = {
+      likelihood: 0.5,
+      likelihoodLow: 0.2, // no likelihoodHigh
+      qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+      signage: "positive",
+    };
+    expect(
+      calculateWeightedNetBenefit([pb], 1, 1, 1, 1, undefined, 1.0),
+    ).toBeCloseTo(0.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conversion metric normalization (§2.5)
+// ---------------------------------------------------------------------------
+
+describe("conversionMetric normalization", () => {
+  it("quantitative magnitude is normalized by threshold", () => {
+    const cm: ConversionMetric = {
+      fromMetric: "USD",
+      extremelyBeneficialThreshold: 100_000,
+    };
+    const pb: PossibleBenefit = {
+      likelihood: 1.0,
+      quantitativeMagnitude: 50_000,
+      quantitativeMetric: "USD",
+      signage: "positive",
+    };
+    expect(
+      calculateWeightedNetBenefit([pb], 1, 1, 1, 1, undefined, 0.5, [cm]),
+    ).toBeCloseTo(0.5);
+  });
+
+  it("magnitude exceeding threshold is clamped at 1.0", () => {
+    const cm: ConversionMetric = {
+      fromMetric: "USD",
+      extremelyBeneficialThreshold: 1000,
+    };
+    const pb: PossibleBenefit = {
+      likelihood: 1.0,
+      quantitativeMagnitude: 5000,
+      quantitativeMetric: "USD",
+      signage: "positive",
+    };
+    expect(
+      calculateWeightedNetBenefit([pb], 1, 1, 1, 1, undefined, 0.5, [cm]),
+    ).toBeCloseTo(1.0);
+  });
+
+  it("demographic scope is respected", () => {
+    const Dmatch: Demographic = { name: "Billionaires" };
+    const Dother: Demographic = { name: "Average" };
+    const cm: ConversionMetric = {
+      fromMetric: "USD",
+      extremelyBeneficialThreshold: 10_000_000,
+      scope: Dmatch,
+    };
+    const pb: PossibleBenefit = {
+      likelihood: 1.0,
+      quantitativeMagnitude: 1_000_000,
+      quantitativeMetric: "USD",
+      signage: "positive",
+    };
+    // Group matches scope
+    const gMatch: Group = {
+      name: "G",
+      demographicMemberships: [{ demographic: Dmatch, count: 1 }],
+    };
+    expect(
+      calculateWeightedNetBenefit(
+        [pb],
+        1,
+        1,
+        1,
+        1,
+        undefined,
+        0.5,
+        [cm],
+        gMatch,
+      ),
+    ).toBeCloseTo(0.1);
+
+    // Group does NOT match scope
+    const gOther: Group = {
+      name: "G",
+      demographicMemberships: [{ demographic: Dother, count: 1 }],
+    };
+    expect(
+      calculateWeightedNetBenefit(
+        [pb],
+        1,
+        1,
+        1,
+        1,
+        undefined,
+        0.5,
+        [cm],
+        gOther,
+      ),
+    ).toBeCloseTo(1_000_000);
+  });
+
+  it("qualitative magnitude ignores conversion metrics", () => {
+    const cm: ConversionMetric = {
+      fromMetric: "USD",
+      extremelyBeneficialThreshold: 100,
+    };
+    const pb: PossibleBenefit = {
+      likelihood: 1.0,
+      qualitativeMagnitude: QualitativeMagnitude.ExtremelyHigh,
+      signage: "positive",
+    };
+    expect(
+      calculateWeightedNetBenefit([pb], 1, 1, 1, 1, undefined, 0.5, [cm]),
+    ).toBeCloseTo(1.0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Differential-based priority construction (§3.2)
+// ---------------------------------------------------------------------------
+
+describe("buildMoralPrioritiesFromDifferentials", () => {
+  it("anchor gets rank 1 and ordinal 6", () => {
+    const D: Demographic = { name: "Children" };
+    const anchor: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: D,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+    };
+    const result = buildMoralPrioritiesFromDifferentials(anchor, []);
+    expect(result.length).toBe(1);
+    expect(result[0].rank).toBe(1);
+    expect(result[0].importance).toBe(QualitativeMagnitude.ExtremelyHigh);
+  });
+
+  it("single differential reduces ordinal", () => {
+    const D1: Demographic = { name: "A" };
+    const D2: Demographic = { name: "B" };
+    const anchor: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: D1,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+    };
+    const c2: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: D2,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+    };
+    const result = buildMoralPrioritiesFromDifferentials(anchor, [
+      [c2, QualitativeDifferenceMagnitude.SlightlyMoreOrLessPreferable],
+    ]);
+    expect(result.length).toBe(2);
+    expect(result[0].importance).toBe(QualitativeMagnitude.ExtremelyHigh);
+    expect(result[1].importance).toBe(QualitativeMagnitude.SomewhatHigh); // 6 - 2 = 4
+    expect(result[1].rank).toBe(2);
+  });
+
+  it("multiple differentials accumulate correctly", () => {
+    const D1: Demographic = { name: "A" };
+    const D2: Demographic = { name: "B" };
+    const D3: Demographic = { name: "C" };
+    const anchor: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: D1,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+    };
+    const c2: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: D2,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+    };
+    const c3: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: D3,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+    };
+    const result = buildMoralPrioritiesFromDifferentials(anchor, [
+      [c2, QualitativeDifferenceMagnitude.SlightlyMoreOrLessPreferable], // gap 2
+      [c3, QualitativeDifferenceMagnitude.MarginallyMoreOrLessPreferable], // gap 1
+    ]);
+    expect(result.length).toBe(3);
+    expect(result[2].importance).toBe(QualitativeMagnitude.Moderate); // 6-2-1 = 3
+    expect(result[2].rank).toBe(3);
+  });
+
+  it("ordinal never drops below 0", () => {
+    const D1: Demographic = { name: "A" };
+    const D2: Demographic = { name: "B" };
+    const anchor: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: D1,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+    };
+    const c2: DemographicMoralConcern = {
+      kind: "demographic",
+      demographic: D2,
+      facetOfProsperity: "health",
+      outlook: "short-term",
+    };
+    const result = buildMoralPrioritiesFromDifferentials(anchor, [
+      [c2, QualitativeDifferenceMagnitude.OverwhelminglyMoreOrLess], // gap 6
+    ]);
+    expect(result[1].importance).toBe(QualitativeMagnitude.Negligible);
+  });
+
+  it("works with CharacteristicBandMoralConcern", () => {
+    const C: NumericalCharacteristic = {
+      kind: "numerical",
+      name: "age",
+      minValue: 0,
+      maxValue: 120,
+    };
+    const anchor: CharacteristicBandMoralConcern = {
+      kind: "characteristicBand",
+      characteristicBands: [{ characteristic: C, minValue: 0, maxValue: 18 }],
+      facetOfProsperity: "health",
+      outlook: "short-term",
+    };
+    const result = buildMoralPrioritiesFromDifferentials(anchor, []);
+    expect(result[0].importance).toBe(QualitativeMagnitude.ExtremelyHigh);
   });
 });
